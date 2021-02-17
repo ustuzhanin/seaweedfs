@@ -2,17 +2,19 @@ package storage
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"sync"
 
+	"github.com/chrislusf/seaweedfs/weed/storage/idx"
 	"github.com/chrislusf/seaweedfs/weed/storage/needle_map"
 	. "github.com/chrislusf/seaweedfs/weed/storage/types"
 )
 
-type NeedleMapType int
+type NeedleMapKind int
 
 const (
-	NeedleMapInMemory      NeedleMapType = iota
+	NeedleMapInMemory      NeedleMapKind = iota
 	NeedleMapLevelDb                     // small memory footprint, 4MB total, 1 write buffer, 3 block buffer
 	NeedleMapLevelDbMedium               // medium memory footprint, 8MB total, 3 write buffer, 5 block buffer
 	NeedleMapLevelDbLarge                // large memory footprint, 12MB total, 4write buffer, 8 block buffer
@@ -31,6 +33,7 @@ type NeedleMapper interface {
 	MaxFileKey() NeedleId
 	IndexFileSize() uint64
 	Sync() error
+	ReadIndexEntry(n int64) (key NeedleId, offset Offset, size Size, err error)
 }
 
 type baseNeedleMapper struct {
@@ -63,4 +66,21 @@ func (nm *baseNeedleMapper) appendToIndexFile(key NeedleId, offset Offset, size 
 
 func (nm *baseNeedleMapper) Sync() error {
 	return nm.indexFile.Sync()
+}
+
+func (nm *baseNeedleMapper) ReadIndexEntry(n int64) (key NeedleId, offset Offset, size Size, err error) {
+	bytes := make([]byte, NeedleMapEntrySize)
+	var readCount int
+	if readCount, err = nm.indexFile.ReadAt(bytes, n*NeedleMapEntrySize); err != nil {
+		if err == io.EOF {
+			if readCount == NeedleMapEntrySize {
+				err = nil
+			}
+		}
+		if err != nil {
+			return
+		}
+	}
+	key, offset, size = idx.IdxFileEntry(bytes)
+	return
 }

@@ -29,29 +29,13 @@ type FilerPostResult struct {
 	Url   string `json:"url,omitempty"`
 }
 
-func (fs *FilerServer) assignNewFileInfo(replication, collection, dataCenter, ttlString string, fsync bool) (fileId, urlLocation string, auth security.EncodedJwt, err error) {
+func (fs *FilerServer) assignNewFileInfo(so *operation.StorageOption) (fileId, urlLocation string, auth security.EncodedJwt, err error) {
 
 	stats.FilerRequestCounter.WithLabelValues("assign").Inc()
 	start := time.Now()
 	defer func() { stats.FilerRequestHistogram.WithLabelValues("assign").Observe(time.Since(start).Seconds()) }()
 
-	ar := &operation.VolumeAssignRequest{
-		Count:       1,
-		Replication: replication,
-		Collection:  collection,
-		Ttl:         ttlString,
-		DataCenter:  dataCenter,
-	}
-	var altRequest *operation.VolumeAssignRequest
-	if dataCenter != "" {
-		altRequest = &operation.VolumeAssignRequest{
-			Count:       1,
-			Replication: replication,
-			Collection:  collection,
-			Ttl:         ttlString,
-			DataCenter:  "",
-		}
-	}
+	ar, altRequest := so.ToAssignRequests(1)
 
 	assignResult, ae := operation.Assign(fs.filer.GetMaster(), fs.grpcDialOption, ar, altRequest)
 	if ae != nil {
@@ -61,7 +45,7 @@ func (fs *FilerServer) assignNewFileInfo(replication, collection, dataCenter, tt
 	}
 	fileId = assignResult.Fid
 	urlLocation = "http://" + assignResult.Url + "/" + assignResult.Fid
-	if fsync {
+	if so.Fsync {
 		urlLocation += "?fsync=true"
 	}
 	auth = assignResult.Auth
@@ -73,21 +57,17 @@ func (fs *FilerServer) PostHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := context.Background()
 
 	query := r.URL.Query()
-	collection, replication, fsync := fs.detectCollection(r.RequestURI, query.Get("collection"), query.Get("replication"))
-	dataCenter := query.Get("dataCenter")
-	if dataCenter == "" {
-		dataCenter = fs.option.DataCenter
-	}
-	ttlString := r.URL.Query().Get("ttl")
+	so := fs.detectStorageOption0(r.RequestURI,
+		query.Get("collection"),
+		query.Get("replication"),
+		query.Get("ttl"),
+		query.Get("disk"),
+		query.Get("dataCenter"),
+		query.Get("rack"),
+	)
 
-	// read ttl in seconds
-	ttl, err := needle.ReadTTL(ttlString)
-	ttlSeconds := int32(0)
-	if err == nil {
-		ttlSeconds = int32(ttl.Minutes()) * 60
-	}
-
-	fs.autoChunk(ctx, w, r, replication, collection, dataCenter, ttlSeconds, ttlString, fsync)
+	fs.autoChunk(ctx, w, r, so)
+	util.CloseRequest(r)
 
 }
 
@@ -116,7 +96,7 @@ func (fs *FilerServer) DeleteHandler(w http.ResponseWriter, r *http.Request) {
 		glog.V(1).Infoln("deleting", objectPath, ":", err.Error())
 		httpStatus := http.StatusInternalServerError
 		if err == filer_pb.ErrNotFound {
-			httpStatus = http.StatusNotFound
+			httpStatus = http.StatusNoContent
 		}
 		writeJsonError(w, r, httpStatus, err)
 		return
@@ -125,31 +105,48 @@ func (fs *FilerServer) DeleteHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (fs *FilerServer) detectCollection(requestURI, qCollection, qReplication string) (collection, replication string, fsync bool) {
-	// default
-	collection = fs.option.Collection
-	replication = fs.option.DefaultReplication
-
-	// get default collection settings
-	if qCollection != "" {
-		collection = qCollection
-	}
-	if qReplication != "" {
-		replication = qReplication
-	}
+func (fs *FilerServer) detectStorageOption(requestURI, qCollection, qReplication string, ttlSeconds int32, diskType string, dataCenter, rack string) *operation.StorageOption {
+	collection := util.Nvl(qCollection, fs.option.Collection)
+	replication := util.Nvl(qReplication, fs.option.DefaultReplication)
 
 	// required by buckets folder
+	bucketDefaultReplication, fsync := "", false
 	if strings.HasPrefix(requestURI, fs.filer.DirBucketsPath+"/") {
-		bucketAndObjectKey := requestURI[len(fs.filer.DirBucketsPath)+1:]
-		t := strings.Index(bucketAndObjectKey, "/")
-		if t < 0 {
-			collection = bucketAndObjectKey
-		}
-		if t > 0 {
-			collection = bucketAndObjectKey[:t]
-		}
-		replication, fsync = fs.filer.ReadBucketOption(collection)
+		collection = fs.filer.DetectBucket(util.FullPath(requestURI))
+		bucketDefaultReplication, fsync = fs.filer.ReadBucketOption(collection)
+	}
+	if replication == "" {
+		replication = bucketDefaultReplication
 	}
 
-	return
+	rule := fs.filer.FilerConf.MatchStorageRule(requestURI)
+
+	if ttlSeconds == 0 {
+		ttl, err := needle.ReadTTL(rule.GetTtl())
+		if err != nil {
+			glog.Errorf("fail to parse %s ttl setting %s: %v", rule.LocationPrefix, rule.Ttl, err)
+		}
+		ttlSeconds = int32(ttl.Minutes()) * 60
+	}
+
+	return &operation.StorageOption{
+		Replication:       util.Nvl(replication, rule.Replication),
+		Collection:        util.Nvl(collection, rule.Collection),
+		DataCenter:        util.Nvl(dataCenter, fs.option.DataCenter),
+		Rack:              util.Nvl(rack, fs.option.Rack),
+		TtlSeconds:        ttlSeconds,
+		DiskType:          util.Nvl(diskType, rule.DiskType),
+		Fsync:             fsync || rule.Fsync,
+		VolumeGrowthCount: rule.VolumeGrowthCount,
+	}
+}
+
+func (fs *FilerServer) detectStorageOption0(requestURI, qCollection, qReplication string, qTtl string, diskType string, dataCenter, rack string) *operation.StorageOption {
+
+	ttl, err := needle.ReadTTL(qTtl)
+	if err != nil {
+		glog.Errorf("fail to parse ttl %s: %v", qTtl, err)
+	}
+
+	return fs.detectStorageOption(requestURI, qCollection, qReplication, int32(ttl.Minutes())*60, diskType, dataCenter, rack)
 }

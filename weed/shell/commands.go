@@ -45,7 +45,7 @@ var (
 func NewCommandEnv(options ShellOptions) *CommandEnv {
 	ce := &CommandEnv{
 		env:          make(map[string]string),
-		MasterClient: wdclient.NewMasterClient(options.GrpcDialOption, pb.AdminShellClient, "", 0, strings.Split(*options.Masters, ",")),
+		MasterClient: wdclient.NewMasterClient(options.GrpcDialOption, pb.AdminShellClient, "", 0, "", strings.Split(*options.Masters, ",")),
 		option:       options,
 	}
 	ce.locker = exclusive_locks.NewExclusiveLocker(ce.MasterClient)
@@ -102,8 +102,8 @@ func (ce *CommandEnv) WithFilerClient(fn func(filer_pb.SeaweedFilerClient) error
 
 }
 
-func (ce *CommandEnv) AdjustedUrl(hostAndPort string) string {
-	return hostAndPort
+func (ce *CommandEnv) AdjustedUrl(location *filer_pb.Location) string {
+	return location.Url
 }
 
 func parseFilerUrl(entryPath string) (filerServer string, filerPort int64, path string, err error) {

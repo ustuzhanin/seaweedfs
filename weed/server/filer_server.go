@@ -3,11 +3,12 @@ package weed_server
 import (
 	"context"
 	"fmt"
-	"github.com/chrislusf/seaweedfs/weed/stats"
 	"net/http"
 	"os"
 	"sync"
 	"time"
+
+	"github.com/chrislusf/seaweedfs/weed/stats"
 
 	"google.golang.org/grpc"
 
@@ -22,11 +23,15 @@ import (
 	_ "github.com/chrislusf/seaweedfs/weed/filer/cassandra"
 	_ "github.com/chrislusf/seaweedfs/weed/filer/elastic/v7"
 	_ "github.com/chrislusf/seaweedfs/weed/filer/etcd"
+	_ "github.com/chrislusf/seaweedfs/weed/filer/hbase"
 	_ "github.com/chrislusf/seaweedfs/weed/filer/leveldb"
 	_ "github.com/chrislusf/seaweedfs/weed/filer/leveldb2"
+	_ "github.com/chrislusf/seaweedfs/weed/filer/leveldb3"
 	_ "github.com/chrislusf/seaweedfs/weed/filer/mongodb"
 	_ "github.com/chrislusf/seaweedfs/weed/filer/mysql"
+	_ "github.com/chrislusf/seaweedfs/weed/filer/mysql2"
 	_ "github.com/chrislusf/seaweedfs/weed/filer/postgres"
+	_ "github.com/chrislusf/seaweedfs/weed/filer/postgres2"
 	_ "github.com/chrislusf/seaweedfs/weed/filer/redis"
 	_ "github.com/chrislusf/seaweedfs/weed/filer/redis2"
 	"github.com/chrislusf/seaweedfs/weed/glog"
@@ -47,12 +52,14 @@ type FilerOption struct {
 	MaxMB              int
 	DirListingLimit    int
 	DataCenter         string
+	Rack               string
 	DefaultLevelDbDir  string
 	DisableHttp        bool
 	Host               string
 	Port               uint32
 	recursiveDelete    bool
 	Cipher             bool
+	SaveToFilerLimit   int
 	Filers             []string
 }
 
@@ -87,7 +94,7 @@ func NewFilerServer(defaultMux, readonlyMux *http.ServeMux, option *FilerOption)
 		glog.Fatal("master list is required!")
 	}
 
-	fs.filer = filer.NewFiler(option.Masters, fs.grpcDialOption, option.Host, option.Port, option.Collection, option.DefaultReplication, func() {
+	fs.filer = filer.NewFiler(option.Masters, fs.grpcDialOption, option.Host, option.Port, option.Collection, option.DefaultReplication, option.DataCenter, func() {
 		fs.listenersCond.Broadcast()
 	})
 	fs.filer.Cipher = option.Cipher
@@ -106,12 +113,16 @@ func NewFilerServer(defaultMux, readonlyMux *http.ServeMux, option *FilerOption)
 			os.MkdirAll(option.DefaultLevelDbDir, 0755)
 		}
 		glog.V(0).Infof("default to create filer store dir in %s", option.DefaultLevelDbDir)
+	} else {
+		glog.Warningf("skipping default store dir in %s", option.DefaultLevelDbDir)
 	}
 	util.LoadConfiguration("notification", false)
 
 	fs.option.recursiveDelete = v.GetBool("filer.options.recursive_delete")
 	v.SetDefault("filer.options.buckets_folder", "/buckets")
 	fs.filer.DirBucketsPath = v.GetString("filer.options.buckets_folder")
+	// TODO deprecated, will be be removed after 2020-12-31
+	// replaced by https://github.com/chrislusf/seaweedfs/wiki/Path-Specific-Configuration
 	fs.filer.FsyncBuckets = v.GetStringSlice("filer.options.buckets_fsync")
 	fs.filer.LoadConfiguration(v)
 
@@ -122,12 +133,15 @@ func NewFilerServer(defaultMux, readonlyMux *http.ServeMux, option *FilerOption)
 		defaultMux.HandleFunc("/", fs.filerHandler)
 	}
 	if defaultMux != readonlyMux {
+		handleStaticResources(readonlyMux)
 		readonlyMux.HandleFunc("/", fs.readonlyFilerHandler)
 	}
 
 	fs.filer.AggregateFromPeers(fmt.Sprintf("%s:%d", option.Host, option.Port), option.Filers)
 
 	fs.filer.LoadBuckets()
+
+	fs.filer.LoadFilerConf()
 
 	grace.OnInterrupt(func() {
 		fs.filer.Shutdown()

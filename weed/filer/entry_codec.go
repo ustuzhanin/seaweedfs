@@ -18,6 +18,7 @@ func (entry *Entry) EncodeAttributesAndChunks() ([]byte, error) {
 		Extended:        entry.Extended,
 		HardLinkId:      entry.HardLinkId,
 		HardLinkCounter: entry.HardLinkCounter,
+		Content:         entry.Content,
 	}
 	return proto.Marshal(message)
 }
@@ -38,6 +39,7 @@ func (entry *Entry) DecodeAttributesAndChunks(blob []byte) error {
 
 	entry.HardLinkId = message.HardLinkId
 	entry.HardLinkCounter = message.HardLinkCounter
+	entry.Content = message.Content
 
 	return nil
 }
@@ -54,6 +56,7 @@ func EntryAttributeToPb(entry *Entry) *filer_pb.FuseAttributes {
 		Collection:    entry.Attr.Collection,
 		Replication:   entry.Attr.Replication,
 		TtlSec:        entry.Attr.TtlSec,
+		DiskType:      entry.Attr.DiskType,
 		UserName:      entry.Attr.UserName,
 		GroupName:     entry.Attr.GroupNames,
 		SymlinkTarget: entry.Attr.SymlinkTarget,
@@ -79,6 +82,7 @@ func PbToEntryAttribute(attr *filer_pb.FuseAttributes) Attr {
 	t.Collection = attr.Collection
 	t.Replication = attr.Replication
 	t.TtlSec = attr.TtlSec
+	t.DiskType = attr.DiskType
 	t.UserName = attr.UserName
 	t.GroupNames = attr.GroupName
 	t.SymlinkTarget = attr.SymlinkTarget
@@ -120,6 +124,9 @@ func EqualEntry(a, b *Entry) bool {
 		return false
 	}
 	if a.HardLinkCounter != b.HardLinkCounter {
+		return false
+	}
+	if !bytes.Equal(a.Content, b.Content) {
 		return false
 	}
 	return true

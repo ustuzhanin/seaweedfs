@@ -18,7 +18,7 @@ import (
 
 const (
 	LogFlushInterval = time.Minute
-	PaginationSize   = 1024 * 256
+	PaginationSize   = 1024
 	FilerStoreId     = "filer.store.id"
 )
 
@@ -41,14 +41,16 @@ type Filer struct {
 	metaLogReplication  string
 	MetaAggregator      *MetaAggregator
 	Signature           int32
+	FilerConf           *FilerConf
 }
 
 func NewFiler(masters []string, grpcDialOption grpc.DialOption,
-	filerHost string, filerGrpcPort uint32, collection string, replication string, notifyFn func()) *Filer {
+	filerHost string, filerGrpcPort uint32, collection string, replication string, dataCenter string, notifyFn func()) *Filer {
 	f := &Filer{
-		MasterClient:        wdclient.NewMasterClient(grpcDialOption, "filer", filerHost, filerGrpcPort, masters),
+		MasterClient:        wdclient.NewMasterClient(grpcDialOption, "filer", filerHost, filerGrpcPort, dataCenter, masters),
 		fileIdDeletionQueue: util.NewUnboundedQueue(),
 		GrpcDialOption:      grpcDialOption,
+		FilerConf:           NewFilerConf(),
 	}
 	f.LocalMetaLogBuffer = log_buffer.NewLogBuffer(LogFlushInterval, f.logFlushFunc, notifyFn)
 	f.metaLogCollection = collection
@@ -132,69 +134,7 @@ func (f *Filer) CreateEntry(ctx context.Context, entry *Entry, o_excl bool, isFr
 		return nil
 	}
 
-	dirParts := strings.Split(string(entry.FullPath), "/")
-
-	// fmt.Printf("directory parts: %+v\n", dirParts)
-
-	var lastDirectoryEntry *Entry
-
-	for i := 1; i < len(dirParts); i++ {
-		dirPath := "/" + util.Join(dirParts[:i]...)
-		// fmt.Printf("%d directory: %+v\n", i, dirPath)
-
-		// check the store directly
-		glog.V(4).Infof("find uncached directory: %s", dirPath)
-		dirEntry, _ := f.FindEntry(ctx, util.FullPath(dirPath))
-
-		// no such existing directory
-		if dirEntry == nil {
-
-			// create the directory
-			now := time.Now()
-
-			dirEntry = &Entry{
-				FullPath: util.FullPath(dirPath),
-				Attr: Attr{
-					Mtime:       now,
-					Crtime:      now,
-					Mode:        os.ModeDir | entry.Mode | 0110,
-					Uid:         entry.Uid,
-					Gid:         entry.Gid,
-					Collection:  entry.Collection,
-					Replication: entry.Replication,
-					UserName:    entry.UserName,
-					GroupNames:  entry.GroupNames,
-				},
-			}
-
-			glog.V(2).Infof("create directory: %s %v", dirPath, dirEntry.Mode)
-			mkdirErr := f.Store.InsertEntry(ctx, dirEntry)
-			if mkdirErr != nil {
-				if _, err := f.FindEntry(ctx, util.FullPath(dirPath)); err == filer_pb.ErrNotFound {
-					glog.V(3).Infof("mkdir %s: %v", dirPath, mkdirErr)
-					return fmt.Errorf("mkdir %s: %v", dirPath, mkdirErr)
-				}
-			} else {
-				f.maybeAddBucket(dirEntry)
-				f.NotifyUpdateEvent(ctx, nil, dirEntry, false, isFromOtherCluster, nil)
-			}
-
-		} else if !dirEntry.IsDirectory() {
-			glog.Errorf("CreateEntry %s: %s should be a directory", entry.FullPath, dirPath)
-			return fmt.Errorf("%s is a file", dirPath)
-		}
-
-		// remember the direct parent directory entry
-		if i == len(dirParts)-1 {
-			lastDirectoryEntry = dirEntry
-		}
-
-	}
-
-	if lastDirectoryEntry == nil {
-		glog.Errorf("CreateEntry %s: lastDirectoryEntry is nil", entry.FullPath)
-		return fmt.Errorf("parent folder not found: %v", entry.FullPath)
-	}
+	oldEntry, _ := f.FindEntry(ctx, entry.FullPath)
 
 	/*
 		if !hasWritePermission(lastDirectoryEntry, entry) {
@@ -204,10 +144,14 @@ func (f *Filer) CreateEntry(ctx context.Context, entry *Entry, o_excl bool, isFr
 		}
 	*/
 
-	oldEntry, _ := f.FindEntry(ctx, entry.FullPath)
-
-	glog.V(4).Infof("CreateEntry %s: old entry: %v exclusive:%v", entry.FullPath, oldEntry, o_excl)
 	if oldEntry == nil {
+
+		dirParts := strings.Split(string(entry.FullPath), "/")
+		if err := f.ensureParentDirecotryEntry(ctx, entry, dirParts, len(dirParts)-1, isFromOtherCluster); err != nil {
+			return err
+		}
+
+		glog.V(4).Infof("InsertEntry %s: new entry: %v", entry.FullPath, entry.Name())
 		if err := f.Store.InsertEntry(ctx, entry); err != nil {
 			glog.Errorf("insert entry %s: %v", entry.FullPath, err)
 			return fmt.Errorf("insert entry %s: %v", entry.FullPath, err)
@@ -217,6 +161,7 @@ func (f *Filer) CreateEntry(ctx context.Context, entry *Entry, o_excl bool, isFr
 			glog.V(3).Infof("EEXIST: entry %s already exists", entry.FullPath)
 			return fmt.Errorf("EEXIST: entry %s already exists", entry.FullPath)
 		}
+		glog.V(4).Infof("UpdateEntry %s: old entry: %v", entry.FullPath, oldEntry.Name())
 		if err := f.UpdateEntry(ctx, oldEntry, entry); err != nil {
 			glog.Errorf("update entry %s: %v", entry.FullPath, err)
 			return fmt.Errorf("update entry %s: %v", entry.FullPath, err)
@@ -233,8 +178,68 @@ func (f *Filer) CreateEntry(ctx context.Context, entry *Entry, o_excl bool, isFr
 	return nil
 }
 
+func (f *Filer) ensureParentDirecotryEntry(ctx context.Context, entry *Entry, dirParts []string, level int, isFromOtherCluster bool) (err error) {
+
+	if level == 0 {
+		return nil
+	}
+
+	dirPath := "/" + util.Join(dirParts[:level]...)
+	// fmt.Printf("%d directory: %+v\n", i, dirPath)
+
+	// check the store directly
+	glog.V(4).Infof("find uncached directory: %s", dirPath)
+	dirEntry, _ := f.FindEntry(ctx, util.FullPath(dirPath))
+
+	// no such existing directory
+	if dirEntry == nil {
+
+		// ensure parent directory
+		if err = f.ensureParentDirecotryEntry(ctx, entry, dirParts, level-1, isFromOtherCluster); err != nil {
+			return err
+		}
+
+		// create the directory
+		now := time.Now()
+
+		dirEntry = &Entry{
+			FullPath: util.FullPath(dirPath),
+			Attr: Attr{
+				Mtime:       now,
+				Crtime:      now,
+				Mode:        os.ModeDir | entry.Mode | 0110,
+				Uid:         entry.Uid,
+				Gid:         entry.Gid,
+				Collection:  entry.Collection,
+				Replication: entry.Replication,
+				UserName:    entry.UserName,
+				GroupNames:  entry.GroupNames,
+			},
+		}
+
+		glog.V(2).Infof("create directory: %s %v", dirPath, dirEntry.Mode)
+		mkdirErr := f.Store.InsertEntry(ctx, dirEntry)
+		if mkdirErr != nil {
+			if _, err := f.FindEntry(ctx, util.FullPath(dirPath)); err == filer_pb.ErrNotFound {
+				glog.V(3).Infof("mkdir %s: %v", dirPath, mkdirErr)
+				return fmt.Errorf("mkdir %s: %v", dirPath, mkdirErr)
+			}
+		} else {
+			f.maybeAddBucket(dirEntry)
+			f.NotifyUpdateEvent(ctx, nil, dirEntry, false, isFromOtherCluster, nil)
+		}
+
+	} else if !dirEntry.IsDirectory() {
+		glog.Errorf("CreateEntry %s: %s should be a directory", entry.FullPath, dirPath)
+		return fmt.Errorf("%s is a file", dirPath)
+	}
+
+	return nil
+}
+
 func (f *Filer) UpdateEntry(ctx context.Context, oldEntry, entry *Entry) (err error) {
 	if oldEntry != nil {
+		entry.Attr.Crtime = oldEntry.Attr.Crtime
 		if oldEntry.IsDirectory() && !entry.IsDirectory() {
 			glog.Errorf("existing %s is a directory", entry.FullPath)
 			return fmt.Errorf("existing %s is a directory", entry.FullPath)
@@ -247,26 +252,28 @@ func (f *Filer) UpdateEntry(ctx context.Context, oldEntry, entry *Entry) (err er
 	return f.Store.UpdateEntry(ctx, entry)
 }
 
+var (
+	Root = &Entry{
+		FullPath: "/",
+		Attr: Attr{
+			Mtime:  time.Now(),
+			Crtime: time.Now(),
+			Mode:   os.ModeDir | 0755,
+			Uid:    OS_UID,
+			Gid:    OS_GID,
+		},
+	}
+)
+
 func (f *Filer) FindEntry(ctx context.Context, p util.FullPath) (entry *Entry, err error) {
 
-	now := time.Now()
-
 	if string(p) == "/" {
-		return &Entry{
-			FullPath: p,
-			Attr: Attr{
-				Mtime:  now,
-				Crtime: now,
-				Mode:   os.ModeDir | 0755,
-				Uid:    OS_UID,
-				Gid:    OS_GID,
-			},
-		}, nil
+		return Root, nil
 	}
 	entry, err = f.Store.FindEntry(ctx, p)
 	if entry != nil && entry.TtlSec > 0 {
 		if entry.Crtime.Add(time.Duration(entry.TtlSec) * time.Second).Before(time.Now()) {
-			f.Store.DeleteEntry(ctx, p.Child(entry.Name()))
+			f.Store.DeleteOneEntry(ctx, entry)
 			return nil, filer_pb.ErrNotFound
 		}
 	}
@@ -274,38 +281,19 @@ func (f *Filer) FindEntry(ctx context.Context, p util.FullPath) (entry *Entry, e
 
 }
 
-func (f *Filer) ListDirectoryEntries(ctx context.Context, p util.FullPath, startFileName string, inclusive bool, limit int, prefix string) ([]*Entry, error) {
-	if strings.HasSuffix(string(p), "/") && len(p) > 1 {
-		p = p[0 : len(p)-1]
-	}
-
-	var makeupEntries []*Entry
-	entries, expiredCount, lastFileName, err := f.doListDirectoryEntries(ctx, p, startFileName, inclusive, limit, prefix)
-	for expiredCount > 0 && err == nil {
-		makeupEntries, expiredCount, lastFileName, err = f.doListDirectoryEntries(ctx, p, lastFileName, false, expiredCount, prefix)
-		if err == nil {
-			entries = append(entries, makeupEntries...)
-		}
-	}
-
-	return entries, err
-}
-
-func (f *Filer) doListDirectoryEntries(ctx context.Context, p util.FullPath, startFileName string, inclusive bool, limit int, prefix string) (entries []*Entry, expiredCount int, lastFileName string, err error) {
-	listedEntries, listErr := f.Store.ListDirectoryPrefixedEntries(ctx, p, startFileName, inclusive, limit, prefix)
-	if listErr != nil {
-		return listedEntries, expiredCount, "", listErr
-	}
-	for _, entry := range listedEntries {
-		lastFileName = entry.Name()
+func (f *Filer) doListDirectoryEntries(ctx context.Context, p util.FullPath, startFileName string, inclusive bool, limit int64, prefix string, eachEntryFunc ListEachEntryFunc) (expiredCount int64, lastFileName string, err error) {
+	lastFileName, err = f.Store.ListDirectoryPrefixedEntries(ctx, p, startFileName, inclusive, limit, prefix, func(entry *Entry) bool {
 		if entry.TtlSec > 0 {
 			if entry.Crtime.Add(time.Duration(entry.TtlSec) * time.Second).Before(time.Now()) {
-				f.Store.DeleteEntry(ctx, p.Child(entry.Name()))
+				f.Store.DeleteOneEntry(ctx, entry)
 				expiredCount++
-				continue
+				return true
 			}
 		}
-		entries = append(entries, entry)
+		return eachEntryFunc(entry)
+	})
+	if err != nil {
+		return expiredCount, lastFileName, err
 	}
 	return
 }
@@ -313,12 +301,4 @@ func (f *Filer) doListDirectoryEntries(ctx context.Context, p util.FullPath, sta
 func (f *Filer) Shutdown() {
 	f.LocalMetaLogBuffer.Shutdown()
 	f.Store.Shutdown()
-}
-
-func (f *Filer) maybeDeleteHardLinks(hardLinkIds []HardLinkId) {
-	for _, hardLinkId := range hardLinkIds {
-		if err := f.Store.DeleteHardLink(context.Background(), hardLinkId); err != nil {
-			glog.Errorf("delete hard link id %d : %v", hardLinkId, err)
-		}
-	}
 }

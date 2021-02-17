@@ -1,5 +1,6 @@
 package seaweedfs.client;
 
+import com.google.common.base.Strings;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -10,18 +11,12 @@ import java.util.Arrays;
 import java.util.Iterator;
 import java.util.List;
 
-public class FilerClient {
+public class FilerClient extends FilerGrpcClient {
 
     private static final Logger LOG = LoggerFactory.getLogger(FilerClient.class);
 
-    private final FilerGrpcClient filerGrpcClient;
-
     public FilerClient(String host, int grpcPort) {
-        filerGrpcClient = new FilerGrpcClient(host, grpcPort);
-    }
-
-    public FilerClient(FilerGrpcClient filerGrpcClient) {
-        this.filerGrpcClient = filerGrpcClient;
+        super(host, grpcPort);
     }
 
     public static String toFileId(FilerProto.FileId fid) {
@@ -235,7 +230,7 @@ public class FilerClient {
     }
 
     public List<FilerProto.Entry> listEntries(String path, String entryPrefix, String lastEntryName, int limit, boolean includeLastEntry) {
-        Iterator<FilerProto.ListEntriesResponse> iter = filerGrpcClient.getBlockingStub().listEntries(FilerProto.ListEntriesRequest.newBuilder()
+        Iterator<FilerProto.ListEntriesResponse> iter = this.getBlockingStub().listEntries(FilerProto.ListEntriesRequest.newBuilder()
                 .setDirectory(path)
                 .setPrefix(entryPrefix)
                 .setStartFromFileName(lastEntryName)
@@ -252,7 +247,7 @@ public class FilerClient {
 
     public FilerProto.Entry lookupEntry(String directory, String entryName) {
         try {
-            FilerProto.Entry entry = filerGrpcClient.getBlockingStub().lookupDirectoryEntry(
+            FilerProto.Entry entry = this.getBlockingStub().lookupDirectoryEntry(
                     FilerProto.LookupDirectoryEntryRequest.newBuilder()
                             .setDirectory(directory)
                             .setName(entryName)
@@ -272,25 +267,30 @@ public class FilerClient {
 
     public boolean createEntry(String parent, FilerProto.Entry entry) {
         try {
-            filerGrpcClient.getBlockingStub().createEntry(FilerProto.CreateEntryRequest.newBuilder()
-                    .setDirectory(parent)
-                    .setEntry(entry)
-                    .build());
+            FilerProto.CreateEntryResponse createEntryResponse =
+                    this.getBlockingStub().createEntry(FilerProto.CreateEntryRequest.newBuilder()
+                            .setDirectory(parent)
+                            .setEntry(entry)
+                            .build());
+            if (Strings.isNullOrEmpty(createEntryResponse.getError())) {
+                return true;
+            }
+            LOG.warn("createEntry {}/{} error: {}", parent, entry.getName(), createEntryResponse.getError());
+            return false;
         } catch (Exception e) {
             LOG.warn("createEntry {}/{}: {}", parent, entry.getName(), e);
             return false;
         }
-        return true;
     }
 
     public boolean updateEntry(String parent, FilerProto.Entry entry) {
         try {
-            filerGrpcClient.getBlockingStub().updateEntry(FilerProto.UpdateEntryRequest.newBuilder()
+            this.getBlockingStub().updateEntry(FilerProto.UpdateEntryRequest.newBuilder()
                     .setDirectory(parent)
                     .setEntry(entry)
                     .build());
         } catch (Exception e) {
-            LOG.warn("createEntry {}/{}: {}", parent, entry.getName(), e);
+            LOG.warn("updateEntry {}/{}: {}", parent, entry.getName(), e);
             return false;
         }
         return true;
@@ -298,7 +298,7 @@ public class FilerClient {
 
     public boolean deleteEntry(String parent, String entryName, boolean isDeleteFileChunk, boolean isRecursive, boolean ignoreRecusiveError) {
         try {
-            filerGrpcClient.getBlockingStub().deleteEntry(FilerProto.DeleteEntryRequest.newBuilder()
+            this.getBlockingStub().deleteEntry(FilerProto.DeleteEntryRequest.newBuilder()
                     .setDirectory(parent)
                     .setName(entryName)
                     .setIsDeleteData(isDeleteFileChunk)
@@ -314,7 +314,7 @@ public class FilerClient {
 
     public boolean atomicRenameEntry(String oldParent, String oldName, String newParent, String newName) {
         try {
-            filerGrpcClient.getBlockingStub().atomicRenameEntry(FilerProto.AtomicRenameEntryRequest.newBuilder()
+            this.getBlockingStub().atomicRenameEntry(FilerProto.AtomicRenameEntryRequest.newBuilder()
                     .setOldDirectory(oldParent)
                     .setOldName(oldName)
                     .setNewDirectory(newParent)
@@ -325,6 +325,15 @@ public class FilerClient {
             return false;
         }
         return true;
+    }
+
+    public Iterator<FilerProto.SubscribeMetadataResponse> watch(String prefix, String clientName, long sinceNs) {
+        return this.getBlockingStub().subscribeMetadata(FilerProto.SubscribeMetadataRequest.newBuilder()
+                .setPathPrefix(prefix)
+                .setClientName(clientName)
+                .setSinceNs(sinceNs)
+                .build()
+        );
     }
 
 }

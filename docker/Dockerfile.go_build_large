@@ -1,8 +1,12 @@
 FROM frolvlad/alpine-glibc as builder
-RUN apk add git go g++
+RUN apk add git go g++ fuse
 RUN mkdir -p /go/src/github.com/chrislusf/
 RUN git clone https://github.com/chrislusf/seaweedfs /go/src/github.com/chrislusf/seaweedfs
-RUN cd /go/src/github.com/chrislusf/seaweedfs/weed && go install -tags 5BytesOffset
+ARG BRANCH=${BRANCH:-master}
+RUN cd /go/src/github.com/chrislusf/seaweedfs && git checkout $BRANCH
+RUN cd /go/src/github.com/chrislusf/seaweedfs/weed \
+  && export LDFLAGS="-X github.com/chrislusf/seaweedfs/weed/util.COMMIT=$(git rev-parse --short HEAD)" \
+  && go install -tags 5BytesOffset -ldflags "${LDFLAGS}"
 
 FROM alpine AS final
 LABEL author="Chris Lu"
@@ -10,6 +14,7 @@ COPY --from=builder /root/go/bin/weed /usr/bin/
 RUN mkdir -p /etc/seaweedfs
 COPY --from=builder /go/src/github.com/chrislusf/seaweedfs/docker/filer.toml /etc/seaweedfs/filer.toml
 COPY --from=builder /go/src/github.com/chrislusf/seaweedfs/docker/entrypoint.sh /entrypoint.sh
+RUN apk add fuse # for weed mount
 
 # volume server gprc port
 EXPOSE 18080
@@ -25,6 +30,8 @@ EXPOSE 19333
 EXPOSE 9333
 # s3 server http port
 EXPOSE 8333
+# webdav server http port
+EXPOSE 7333
 
 RUN mkdir -p /data/filerldb2
 

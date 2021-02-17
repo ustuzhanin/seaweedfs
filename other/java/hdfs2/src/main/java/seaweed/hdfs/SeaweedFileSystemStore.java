@@ -1,5 +1,6 @@
 package seaweed.hdfs;
 
+import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSInputStream;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
@@ -17,17 +18,34 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
+import static seaweed.hdfs.SeaweedFileSystem.*;
+
 public class SeaweedFileSystemStore {
 
     private static final Logger LOG = LoggerFactory.getLogger(SeaweedFileSystemStore.class);
 
-    private FilerGrpcClient filerGrpcClient;
     private FilerClient filerClient;
+    private Configuration conf;
 
-    public SeaweedFileSystemStore(String host, int port) {
+    public SeaweedFileSystemStore(String host, int port, Configuration conf) {
         int grpcPort = 10000 + port;
-        filerGrpcClient = new FilerGrpcClient(host, grpcPort);
-        filerClient = new FilerClient(filerGrpcClient);
+        filerClient = new FilerClient(host, grpcPort);
+        this.conf = conf;
+        String volumeServerAccessMode = this.conf.get(FS_SEAWEED_VOLUME_SERVER_ACCESS, "direct");
+        if (volumeServerAccessMode.equals("publicUrl")) {
+            filerClient.setAccessVolumeServerByPublicUrl();
+        } else if (volumeServerAccessMode.equals("filerProxy")) {
+            filerClient.setAccessVolumeServerByFilerProxy();
+        }
+
+    }
+
+    public void close() {
+        try {
+            this.filerClient.shutdown();
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        }
     }
 
     public static String getParentDirectory(Path path) {
@@ -123,7 +141,7 @@ public class SeaweedFileSystemStore {
         long length = SeaweedRead.fileSize(entry);
         boolean isDir = entry.getIsDirectory();
         int block_replication = 1;
-        int blocksize = 512;
+        int blocksize = this.conf.getInt(FS_SEAWEED_BUFFER_SIZE, FS_SEAWEED_DEFAULT_BUFFER_SIZE);
         long modification_time = attributes.getMtime() * 1000; // milliseconds
         long access_time = 0;
         FsPermission permission = FsPermission.createImmutable((short) attributes.getFileMode());
@@ -179,6 +197,7 @@ public class SeaweedFileSystemStore {
             if (existingEntry != null) {
                 entry = FilerProto.Entry.newBuilder();
                 entry.mergeFrom(existingEntry);
+                entry.clearContent();
                 entry.getAttributesBuilder().setMtime(now);
                 LOG.debug("createFile merged entry path:{} entry:{} from:{}", path, entry, existingEntry);
                 writePosition = SeaweedRead.fileSize(existingEntry);
@@ -198,17 +217,16 @@ public class SeaweedFileSystemStore {
                     .clearGroupName()
                     .addAllGroupName(Arrays.asList(userGroupInformation.getGroupNames()))
                 );
-            SeaweedWrite.writeMeta(filerGrpcClient, getParentDirectory(path), entry);
+            SeaweedWrite.writeMeta(filerClient, getParentDirectory(path), entry);
         }
 
-        return new SeaweedOutputStream(filerGrpcClient, path, entry, writePosition, bufferSize, replication);
+        return new SeaweedHadoopOutputStream(filerClient, path.toString(), entry, writePosition, bufferSize, replication);
 
     }
 
-    public FSInputStream openFileForRead(final Path path, FileSystem.Statistics statistics,
-                                         int bufferSize) throws IOException {
+    public FSInputStream openFileForRead(final Path path, FileSystem.Statistics statistics) throws IOException {
 
-        LOG.debug("openFileForRead path:{} bufferSize:{}", path, bufferSize);
+        LOG.debug("openFileForRead path:{}", path);
 
         FilerProto.Entry entry = lookupEntry(path);
 
@@ -216,11 +234,10 @@ public class SeaweedFileSystemStore {
             throw new FileNotFoundException("read non-exist file " + path);
         }
 
-        return new SeaweedInputStream(filerGrpcClient,
+        return new SeaweedHadoopInputStream(filerClient,
             statistics,
             path.toUri().getPath(),
-            entry,
-            bufferSize);
+            entry);
     }
 
     public void setOwner(Path path, String owner, String group) {

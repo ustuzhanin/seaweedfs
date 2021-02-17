@@ -25,6 +25,7 @@ type FilePart struct {
 	Collection  string
 	DataCenter  string
 	Ttl         string
+	DiskType    string
 	Server      string //this comes from assign result
 	Fid         string //this comes from assign result, but customizable
 	Fsync       bool
@@ -32,13 +33,13 @@ type FilePart struct {
 
 type SubmitResult struct {
 	FileName string `json:"fileName,omitempty"`
-	FileUrl  string `json:"fileUrl,omitempty"`
+	FileUrl  string `json:"url,omitempty"`
 	Fid      string `json:"fid,omitempty"`
 	Size     uint32 `json:"size,omitempty"`
 	Error    string `json:"error,omitempty"`
 }
 
-func SubmitFiles(master string, grpcDialOption grpc.DialOption, files []FilePart, replication string, collection string, dataCenter string, ttl string, maxMB int, usePublicUrl bool) ([]SubmitResult, error) {
+func SubmitFiles(master string, grpcDialOption grpc.DialOption, files []FilePart, replication string, collection string, dataCenter string, ttl string, diskType string, maxMB int, usePublicUrl bool) ([]SubmitResult, error) {
 	results := make([]SubmitResult, len(files))
 	for index, file := range files {
 		results[index].FileName = file.FileName
@@ -49,6 +50,7 @@ func SubmitFiles(master string, grpcDialOption grpc.DialOption, files []FilePart
 		Collection:  collection,
 		DataCenter:  dataCenter,
 		Ttl:         ttl,
+		DiskType:    diskType,
 	}
 	ret, err := Assign(master, grpcDialOption, ar)
 	if err != nil {
@@ -69,6 +71,8 @@ func SubmitFiles(master string, grpcDialOption grpc.DialOption, files []FilePart
 		file.Replication = replication
 		file.Collection = collection
 		file.DataCenter = dataCenter
+		file.Ttl = ttl
+		file.DiskType = diskType
 		results[index].Size, err = file.Upload(maxMB, master, usePublicUrl, ret.Auth, grpcDialOption)
 		if err != nil {
 			results[index].Error = err.Error()
@@ -142,6 +146,7 @@ func (fi FilePart) Upload(maxMB int, master string, usePublicUrl bool, jwt secur
 				Replication: fi.Replication,
 				Collection:  fi.Collection,
 				Ttl:         fi.Ttl,
+				DiskType:    fi.DiskType,
 			}
 			ret, err = Assign(master, grpcDialOption, ar)
 			if err != nil {
@@ -155,6 +160,7 @@ func (fi FilePart) Upload(maxMB int, master string, usePublicUrl bool, jwt secur
 					Replication: fi.Replication,
 					Collection:  fi.Collection,
 					Ttl:         fi.Ttl,
+					DiskType:    fi.DiskType,
 				}
 				ret, err = Assign(master, grpcDialOption, ar)
 				if err != nil {

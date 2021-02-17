@@ -3,6 +3,7 @@ package weed_server
 import (
 	"context"
 	"fmt"
+	"github.com/chrislusf/seaweedfs/weed/storage/backend"
 	"net"
 	"strings"
 	"time"
@@ -66,9 +67,7 @@ func (ms *MasterServer) SendHeartbeat(stream master_pb.Seaweed_SendHeartbeatServ
 			dcName, rackName := ms.Topo.Configuration.Locate(heartbeat.Ip, heartbeat.DataCenter, heartbeat.Rack)
 			dc := ms.Topo.GetOrCreateDataCenter(dcName)
 			rack := dc.GetOrCreateRack(rackName)
-			dn = rack.GetOrCreateDataNode(heartbeat.Ip,
-				int(heartbeat.Port), heartbeat.PublicUrl,
-				int64(heartbeat.MaxVolumeCount))
+			dn = rack.GetOrCreateDataNode(heartbeat.Ip, int(heartbeat.Port), heartbeat.PublicUrl, heartbeat.MaxVolumeCounts)
 			glog.V(0).Infof("added volume server %v:%d", heartbeat.GetIp(), heartbeat.GetPort())
 			if err := stream.Send(&master_pb.HeartbeatResponse{
 				VolumeSizeLimit: uint64(ms.option.VolumeSizeLimitMB) * 1024 * 1024,
@@ -78,15 +77,13 @@ func (ms *MasterServer) SendHeartbeat(stream master_pb.Seaweed_SendHeartbeatServ
 			}
 		}
 
-		if heartbeat.MaxVolumeCount != 0 && dn.GetMaxVolumeCount() != int64(heartbeat.MaxVolumeCount) {
-			delta := int64(heartbeat.MaxVolumeCount) - dn.GetMaxVolumeCount()
-			dn.UpAdjustMaxVolumeCountDelta(delta)
-		}
+		dn.AdjustMaxVolumeCounts(heartbeat.MaxVolumeCounts)
 
 		glog.V(4).Infof("master received heartbeat %s", heartbeat.String())
 		message := &master_pb.VolumeLocation{
-			Url:       dn.Url(),
-			PublicUrl: dn.PublicUrl,
+			Url:        dn.Url(),
+			PublicUrl:  dn.PublicUrl,
+			DataCenter: string(dn.GetDataCenter().Id()),
 		}
 		if len(heartbeat.NewVolumes) > 0 || len(heartbeat.DeletedVolumes) > 0 {
 			// process delta volume ids if exists for fast volume id updates
@@ -147,7 +144,6 @@ func (ms *MasterServer) SendHeartbeat(stream master_pb.Seaweed_SendHeartbeatServ
 			}
 
 		}
-
 		if len(message.NewVids) > 0 || len(message.DeletedVids) > 0 {
 			ms.clientChansLock.RLock()
 			for host, ch := range ms.clientChans {
@@ -300,5 +296,21 @@ func (ms *MasterServer) ListMasterClients(ctx context.Context, req *master_pb.Li
 			resp.GrpcAddresses = append(resp.GrpcAddresses, k[len(req.ClientType)+1:])
 		}
 	}
+	return resp, nil
+}
+
+func (ms *MasterServer) GetMasterConfiguration(ctx context.Context, req *master_pb.GetMasterConfigurationRequest) (*master_pb.GetMasterConfigurationResponse, error) {
+
+	// tell the volume servers about the leader
+	leader, _ := ms.Topo.Leader()
+
+	resp := &master_pb.GetMasterConfigurationResponse{
+		MetricsAddress:         ms.option.MetricsAddress,
+		MetricsIntervalSeconds: uint32(ms.option.MetricsIntervalSec),
+		StorageBackends:        backend.ToPbStorageBackends(),
+		DefaultReplication:     ms.option.DefaultReplicaPlacement,
+		Leader:                 leader,
+	}
+
 	return resp, nil
 }

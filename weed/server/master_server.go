@@ -55,7 +55,7 @@ type MasterServer struct {
 	vg     *topology.VolumeGrowth
 	vgLock sync.Mutex
 
-	bounedLeaderChan chan int
+	boundedLeaderChan chan int
 
 	// notifying clients
 	clientChansLock sync.RWMutex
@@ -93,10 +93,10 @@ func NewMasterServer(r *mux.Router, option *MasterOption, peers []string) *Maste
 		preallocateSize: preallocateSize,
 		clientChans:     make(map[string]chan *master_pb.VolumeLocation),
 		grpcDialOption:  grpcDialOption,
-		MasterClient:    wdclient.NewMasterClient(grpcDialOption, "master", option.Host, 0, peers),
+		MasterClient:    wdclient.NewMasterClient(grpcDialOption, "master", option.Host, 0, "", peers),
 		adminLocks:      NewAdminLocks(),
 	}
-	ms.bounedLeaderChan = make(chan int, 16)
+	ms.boundedLeaderChan = make(chan int, 16)
 
 	seq := ms.createSequencer(option)
 	if nil == seq {
@@ -108,10 +108,10 @@ func NewMasterServer(r *mux.Router, option *MasterOption, peers []string) *Maste
 
 	ms.guard = security.NewGuard(ms.option.WhiteList, signingKey, expiresAfterSec, readSigningKey, readExpiresAfterSec)
 
+	handleStaticResources2(r)
+	r.HandleFunc("/", ms.proxyToLeader(ms.uiStatusHandler))
+	r.HandleFunc("/ui/index.html", ms.uiStatusHandler)
 	if !ms.option.DisableHttp {
-		handleStaticResources2(r)
-		r.HandleFunc("/", ms.proxyToLeader(ms.uiStatusHandler))
-		r.HandleFunc("/ui/index.html", ms.uiStatusHandler)
 		r.HandleFunc("/dir/assign", ms.proxyToLeader(ms.guard.WhiteList(ms.dirAssignHandler)))
 		r.HandleFunc("/dir/lookup", ms.guard.WhiteList(ms.dirLookupHandler))
 		r.HandleFunc("/dir/status", ms.proxyToLeader(ms.guard.WhiteList(ms.dirStatusHandler)))
@@ -138,13 +138,10 @@ func NewMasterServer(r *mux.Router, option *MasterOption, peers []string) *Maste
 func (ms *MasterServer) SetRaftServer(raftServer *RaftServer) {
 	ms.Topo.RaftServer = raftServer.raftServer
 	ms.Topo.RaftServer.AddEventListener(raft.LeaderChangeEventType, func(e raft.Event) {
-		glog.V(0).Infof("event: %+v", e)
+		glog.V(0).Infof("leader change event: %+v => %+v", e.PrevValue(), e.Value())
 		if ms.Topo.RaftServer.Leader() != "" {
 			glog.V(0).Infoln("[", ms.Topo.RaftServer.Name(), "]", ms.Topo.RaftServer.Leader(), "becomes leader.")
 		}
-	})
-	ms.Topo.RaftServer.AddEventListener(raft.StateChangeEventType, func(e raft.Event) {
-		glog.V(0).Infof("state change: %+v", e)
 	})
 	if ms.Topo.IsLeader() {
 		glog.V(0).Infoln("[", ms.Topo.RaftServer.Name(), "]", "I am the leader!")
@@ -160,8 +157,8 @@ func (ms *MasterServer) proxyToLeader(f http.HandlerFunc) http.HandlerFunc {
 		if ms.Topo.IsLeader() {
 			f(w, r)
 		} else if ms.Topo.RaftServer != nil && ms.Topo.RaftServer.Leader() != "" {
-			ms.bounedLeaderChan <- 1
-			defer func() { <-ms.bounedLeaderChan }()
+			ms.boundedLeaderChan <- 1
+			defer func() { <-ms.boundedLeaderChan }()
 			targetUrl, err := url.Parse("http://" + ms.Topo.RaftServer.Leader())
 			if err != nil {
 				writeJsonError(w, r, http.StatusInternalServerError,

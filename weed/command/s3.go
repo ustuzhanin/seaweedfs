@@ -23,24 +23,26 @@ var (
 )
 
 type S3Options struct {
-	filer           *string
-	port            *int
-	config          *string
-	domainName      *string
-	tlsPrivateKey   *string
-	tlsCertificate  *string
-	metricsHttpPort *int
+	filer            *string
+	port             *int
+	config           *string
+	domainName       *string
+	tlsPrivateKey    *string
+	tlsCertificate   *string
+	metricsHttpPort  *int
+	allowEmptyFolder *bool
 }
 
 func init() {
 	cmdS3.Run = runS3 // break init cycle
 	s3StandaloneOptions.filer = cmdS3.Flag.String("filer", "localhost:8888", "filer server address")
 	s3StandaloneOptions.port = cmdS3.Flag.Int("port", 8333, "s3 server http listen port")
-	s3StandaloneOptions.domainName = cmdS3.Flag.String("domainName", "", "suffix of the host name, {bucket}.{domainName}")
+	s3StandaloneOptions.domainName = cmdS3.Flag.String("domainName", "", "suffix of the host name in comma separated list, {bucket}.{domainName}")
 	s3StandaloneOptions.config = cmdS3.Flag.String("config", "", "path to the config file")
 	s3StandaloneOptions.tlsPrivateKey = cmdS3.Flag.String("key.file", "", "path to the TLS private key file")
 	s3StandaloneOptions.tlsCertificate = cmdS3.Flag.String("cert.file", "", "path to the TLS certificate file")
 	s3StandaloneOptions.metricsHttpPort = cmdS3.Flag.Int("metricsPort", 0, "Prometheus metrics listen port")
+	s3StandaloneOptions.allowEmptyFolder = cmdS3.Flag.Bool("allowEmptyFolder", false, "allow empty folders")
 }
 
 var cmdS3 = &Command{
@@ -54,7 +56,13 @@ var cmdS3 = &Command{
 {
   "identities": [
     {
-      "name": "some_name",
+      "name": "anonymous",
+      "actions": [
+        "Read"
+      ]
+    },
+    {
+      "name": "some_admin_user",
       "credentials": [
         {
           "accessKey": "some_access_key1",
@@ -64,6 +72,8 @@ var cmdS3 = &Command{
       "actions": [
         "Admin",
         "Read",
+        "List",
+        "Tagging",
         "Write"
       ]
     },
@@ -89,6 +99,8 @@ var cmdS3 = &Command{
       ],
       "actions": [
         "Read",
+        "List",
+        "Tagging",
         "Write"
       ]
     },
@@ -102,6 +114,8 @@ var cmdS3 = &Command{
       ],
       "actions": [
         "Read:bucket1",
+        "List:bucket1",
+        "Tagging:bucket1",
         "Write:bucket1"
       ]
     }
@@ -169,6 +183,7 @@ func (s3opt *S3Options) startS3Server() bool {
 		DomainName:       *s3opt.domainName,
 		BucketsPath:      filerBucketsPath,
 		GrpcDialOption:   grpcDialOption,
+		AllowEmptyFolder: *s3opt.allowEmptyFolder,
 	})
 	if s3ApiServer_err != nil {
 		glog.Fatalf("S3 API Server startup error: %v", s3ApiServer_err)

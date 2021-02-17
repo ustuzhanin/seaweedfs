@@ -44,6 +44,8 @@ func runScaffold(cmd *Command, args []string) bool {
 		content = SECURITY_TOML_EXAMPLE
 	case "master":
 		content = MASTER_TOML_EXAMPLE
+	case "shell":
+		content = SHELL_TOML_EXAMPLE
 	}
 	if content == "" {
 		println("need a valid -config option")
@@ -76,10 +78,6 @@ const (
 recursive_delete = false
 # directories under this folder will be automatically creating a separate bucket
 buckets_folder = "/buckets"
-buckets_fsync = [          # a list of buckets with all write requests fsync=true
-	"important_bucket",
-	"should_always_fsync",
-]
 
 ####################################################
 # The following are filer store options
@@ -89,9 +87,21 @@ buckets_fsync = [          # a list of buckets with all write requests fsync=tru
 # local on disk, mostly for simple single-machine setup, fairly scalable
 # faster than previous leveldb, recommended.
 enabled = true
-dir = "."					# directory to store level db files
+dir = "./filerldb2"					# directory to store level db files
 
-[mysql]  # or tidb
+[leveldb3]
+# similar to leveldb2.
+# each bucket has its own meta store.
+enabled = false
+dir = "./filerldb3"					# directory to store level db files
+
+[rocksdb]
+# local on disk, similar to leveldb
+# since it is using a C wrapper, you need to install rocksdb and build it by yourself
+enabled = false
+dir = "./filerrdb"					# directory to store rocksdb files
+
+[mysql]  # or memsql, tidb
 # CREATE TABLE IF NOT EXISTS filemeta (
 #   dirhash     BIGINT         COMMENT 'first 64 bits of MD5 hash value of directory field',
 #   name        VARCHAR(1000)  COMMENT 'directory or file name',
@@ -108,9 +118,31 @@ password = ""
 database = ""              # create or use an existing database
 connection_max_idle = 2
 connection_max_open = 100
+connection_max_lifetime_seconds = 0
 interpolateParams = false
 
-[postgres] # or cockroachdb
+[mysql2]  # or memsql, tidb
+enabled = false
+createTable = """
+  CREATE TABLE IF NOT EXISTS ` + "`%s`" + ` (
+    dirhash BIGINT,
+    name VARCHAR(1000),
+    directory TEXT,
+    meta LONGBLOB,
+    PRIMARY KEY (dirhash, name)
+  ) DEFAULT CHARSET=utf8;
+"""
+hostname = "localhost"
+port = 3306
+username = "root"
+password = ""
+database = ""              # create or use an existing database
+connection_max_idle = 2
+connection_max_open = 100
+connection_max_lifetime_seconds = 0
+interpolateParams = false
+
+[postgres] # or cockroachdb, YugabyteDB
 # CREATE TABLE IF NOT EXISTS filemeta (
 #   dirhash     BIGINT,
 #   name        VARCHAR(65535),
@@ -123,10 +155,34 @@ hostname = "localhost"
 port = 5432
 username = "postgres"
 password = ""
-database = ""              # create or use an existing database
+database = "postgres"          # create or use an existing database
+schema = ""
 sslmode = "disable"
 connection_max_idle = 100
 connection_max_open = 100
+connection_max_lifetime_seconds = 0
+
+[postgres2]
+enabled = false
+createTable = """
+  CREATE TABLE IF NOT EXISTS "%s" (
+    dirhash   BIGINT, 
+    name      VARCHAR(65535), 
+    directory VARCHAR(65535), 
+    meta      bytea, 
+    PRIMARY KEY (dirhash, name)
+  );
+"""
+hostname = "localhost"
+port = 5432
+username = "postgres"
+password = ""
+database = "postgres"          # create or use an existing database
+schema = ""
+sslmode = "disable"
+connection_max_idle = 100
+connection_max_open = 100
+connection_max_lifetime_seconds = 0
 
 [cassandra]
 # CREATE TABLE filemeta (
@@ -142,12 +198,21 @@ hosts=[
 ]
 username=""
 password=""
+# This changes the data layout. Only add new directories. Removing/Updating will cause data loss.
+superLargeDirectories = []
+
+[hbase]
+enabled = false
+zkquorum = ""
+table = "seaweedfs"
 
 [redis2]
 enabled = false
 address  = "localhost:6379"
 password = ""
 database = 0
+# This changes the data layout. Only add new directories. Removing/Updating will cause data loss.
+superLargeDirectories = []
 
 [redis_cluster2]
 enabled = false
@@ -161,9 +226,11 @@ addresses = [
 ]
 password = ""
 # allows reads from slave servers or the master, but all writes still go to the master
-readOnly = true
+readOnly = false
 # automatically use the closest Redis server for reads
-routeByLatency = true
+routeByLatency = false
+# This changes the data layout. Only add new directories. Removing/Updating will cause data loss.
+superLargeDirectories = []
 
 [etcd]
 enabled = false
@@ -189,6 +256,28 @@ sniff_enabled = false
 healthcheck_enabled = false
 # increase the value is recommend, be sure the value in Elastic is greater or equal here
 index.max_result_window = 10000
+
+
+
+##########################
+##########################
+# To add path-specific filer store:
+#
+# 1. Add a name following the store type separated by a dot ".". E.g., cassandra.tmp
+# 2. Add a location configuraiton. E.g., location = "/tmp/"
+# 3. Copy and customize all other configurations. 
+#     Make sure they are not the same if using the same store type!
+# 4. Set enabled to true
+#
+# The following is just using cassandra as an example
+##########################
+[redis2.tmp]
+enabled = false
+location = "/tmp/"
+address  = "localhost:6379"
+password = ""
+database = 1
+
 `
 
 	NOTIFICATION_TOML_EXAMPLE = `
@@ -242,7 +331,8 @@ enabled = false
 # This URL will Dial the RabbitMQ server at the URL in the environment
 # variable RABBIT_SERVER_URL and open the exchange "myexchange".
 # The exchange must have already been created by some other means, like
-# the RabbitMQ management plugin.
+# the RabbitMQ management plugin. Сreate myexchange of type fanout and myqueue then
+# create binding myexchange => myqueue
 topic_url = "rabbit://myexchange"
 sub_url = "rabbit://myqueue"
 `
@@ -262,6 +352,16 @@ grpcAddress = "localhost:18888"
 # this is not a directory on your hard drive, but on your filer.
 # i.e., all files with this "prefix" are sent to notification message queue.
 directory = "/buckets"
+
+[sink.local]
+enabled = false
+directory = "/data"
+
+[sink.local_incremental]
+# all replicated files are under modified time as yyyy-mm-dd directories
+# so each date directory contains all new and updated files.
+enabled = false
+directory = "/backup"
 
 [sink.filer]
 enabled = false
@@ -429,6 +529,20 @@ copy_other = 1            # create n x 1 = n actual volumes
 # try to replicate to all available volumes. You should only use this option
 # if you are doing your own replication or periodic sync of volumes.
 treat_replication_as_minimums = false
+
+`
+	SHELL_TOML_EXAMPLE = `
+
+[cluster]
+default = "c1"
+
+[cluster.c1]
+master = "localhost:9333"    # comma-separated master servers
+filer = "localhost:8888"     # filer host and port
+
+[cluster.c2]
+master = ""
+filer = ""
 
 `
 )

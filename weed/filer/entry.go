@@ -18,6 +18,7 @@ type Attr struct {
 	Replication   string      // replication
 	Collection    string      // collection name
 	TtlSec        int32       // ttl in seconds
+	DiskType      string
 	UserName      string
 	GroupNames    []string
 	SymlinkTarget string
@@ -40,10 +41,11 @@ type Entry struct {
 
 	HardLinkId      HardLinkId
 	HardLinkCounter int32
+	Content         []byte
 }
 
 func (entry *Entry) Size() uint64 {
-	return maxUint64(TotalSize(entry.Chunks), entry.FileSize)
+	return maxUint64(maxUint64(TotalSize(entry.Chunks), entry.FileSize), uint64(len(entry.Content)))
 }
 
 func (entry *Entry) Timestamp() time.Time {
@@ -66,6 +68,7 @@ func (entry *Entry) ToProtoEntry() *filer_pb.Entry {
 		Extended:        entry.Extended,
 		HardLinkId:      entry.HardLinkId,
 		HardLinkCounter: entry.HardLinkCounter,
+		Content:         entry.Content,
 	}
 }
 
@@ -98,6 +101,7 @@ func FromPbEntry(dir string, entry *filer_pb.Entry) *Entry {
 		Chunks:          entry.Chunks,
 		HardLinkId:      HardLinkId(entry.HardLinkId),
 		HardLinkCounter: entry.HardLinkCounter,
+		Content:         entry.Content,
 	}
 }
 

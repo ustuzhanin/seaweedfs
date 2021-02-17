@@ -3,9 +3,8 @@ package security
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"github.com/chrislusf/seaweedfs/weed/util"
 	"io/ioutil"
-
-	"github.com/spf13/viper"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -13,7 +12,7 @@ import (
 	"github.com/chrislusf/seaweedfs/weed/glog"
 )
 
-func LoadServerTLS(config *viper.Viper, component string) grpc.ServerOption {
+func LoadServerTLS(config *util.ViperProxy, component string) grpc.ServerOption {
 	if config == nil {
 		return nil
 	}
@@ -24,7 +23,7 @@ func LoadServerTLS(config *viper.Viper, component string) grpc.ServerOption {
 		glog.V(1).Infof("load cert/key error: %v", err)
 		return nil
 	}
-	caCert, err := ioutil.ReadFile(config.GetString(component + ".ca"))
+	caCert, err := ioutil.ReadFile(config.GetString("grpc.ca"))
 	if err != nil {
 		glog.V(1).Infof("read ca cert file error: %v", err)
 		return nil
@@ -40,12 +39,12 @@ func LoadServerTLS(config *viper.Viper, component string) grpc.ServerOption {
 	return grpc.Creds(ta)
 }
 
-func LoadClientTLS(config *viper.Viper, component string) grpc.DialOption {
+func LoadClientTLS(config *util.ViperProxy, component string) grpc.DialOption {
 	if config == nil {
 		return grpc.WithInsecure()
 	}
 
-	certFileName, keyFileName, caFileName := config.GetString(component+".cert"), config.GetString(component+".key"), config.GetString(component+".ca")
+	certFileName, keyFileName, caFileName := config.GetString(component+".cert"), config.GetString(component+".key"), config.GetString("grpc.ca")
 	if certFileName == "" || keyFileName == "" || caFileName == "" {
 		return grpc.WithInsecure()
 	}

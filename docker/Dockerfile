@@ -12,6 +12,7 @@ RUN \
     SUPERCRONIC=supercronic-linux-$ARCH && \
     # Install SeaweedFS and Supercronic ( for cron job mode )
     apk add --no-cache --virtual build-dependencies --update wget curl ca-certificates && \
+    apk add fuse && \
     wget -P /tmp https://github.com/$(curl -s -L https://github.com/chrislusf/seaweedfs/releases/latest | egrep -o "chrislusf/seaweedfs/releases/download/.*/linux_$ARCH.tar.gz") && \
     tar -C /usr/bin/ -xzvf /tmp/linux_$ARCH.tar.gz && \
     curl -fsSLO "$SUPERCRONIC_URL" && \
@@ -36,6 +37,8 @@ EXPOSE 19333
 EXPOSE 9333
 # s3 server http port
 EXPOSE 8333
+# webdav server http port
+EXPOSE 7333
 
 RUN mkdir -p /data/filerldb2
 

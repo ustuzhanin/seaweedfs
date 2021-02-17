@@ -2,6 +2,7 @@ package command
 
 import (
 	"fmt"
+	"github.com/chrislusf/seaweedfs/weed/storage/types"
 	"net/http"
 	httppprof "net/http/pprof"
 	"os"
@@ -39,6 +40,7 @@ type VolumeServerOptions struct {
 	publicPort            *int
 	folders               []string
 	folderMaxLimits       []int
+	idxFolder             *string
 	ip                    *string
 	publicUrl             *string
 	bindIp                *string
@@ -48,6 +50,7 @@ type VolumeServerOptions struct {
 	rack                  *string
 	whiteList             []string
 	indexType             *string
+	diskType              *string
 	fixJpgOrientation     *bool
 	readRedirect          *bool
 	cpuProfile            *string
@@ -75,14 +78,16 @@ func init() {
 	v.dataCenter = cmdVolume.Flag.String("dataCenter", "", "current volume server's data center name")
 	v.rack = cmdVolume.Flag.String("rack", "", "current volume server's rack name")
 	v.indexType = cmdVolume.Flag.String("index", "memory", "Choose [memory|leveldb|leveldbMedium|leveldbLarge] mode for memory~performance balance.")
+	v.diskType = cmdVolume.Flag.String("disk", "", "[hdd|ssd] hard drive or solid state drive")
 	v.fixJpgOrientation = cmdVolume.Flag.Bool("images.fix.orientation", false, "Adjust jpg orientation when uploading.")
 	v.readRedirect = cmdVolume.Flag.Bool("read.redirect", true, "Redirect moved or non-local volumes.")
 	v.cpuProfile = cmdVolume.Flag.String("cpuprofile", "", "cpu profile output file")
 	v.memProfile = cmdVolume.Flag.String("memprofile", "", "memory profile output file")
 	v.compactionMBPerSecond = cmdVolume.Flag.Int("compactionMBps", 0, "limit background compaction or copying speed in mega bytes per second")
-	v.fileSizeLimitMB = cmdVolume.Flag.Int("fileSizeLimitMB", 1024, "limit file size to avoid out of memory")
+	v.fileSizeLimitMB = cmdVolume.Flag.Int("fileSizeLimitMB", 256, "limit file size to avoid out of memory")
 	v.pprof = cmdVolume.Flag.Bool("pprof", false, "enable pprof http handlers. precludes --memprofile and --cpuprofile")
 	v.metricsHttpPort = cmdVolume.Flag.Int("metricsPort", 0, "Prometheus metrics listen port")
+	v.idxFolder = cmdVolume.Flag.String("dir.idx", "", "directory to store .idx files")
 }
 
 var cmdVolume = &Command{
@@ -138,6 +143,11 @@ func (v VolumeServerOptions) startVolumeServer(volumeFolders, maxVolumeCounts, v
 			glog.Fatalf("The max specified in -max not a valid number %s", maxString)
 		}
 	}
+	if len(v.folderMaxLimits) == 1 && len(v.folders) > 1 {
+		for i := 0; i < len(v.folders)-1; i++ {
+			v.folderMaxLimits = append(v.folderMaxLimits, v.folderMaxLimits[0])
+		}
+	}
 	if len(v.folders) != len(v.folderMaxLimits) {
 		glog.Fatalf("%d directories by -dir, but only %d max is set by -max", len(v.folders), len(v.folderMaxLimits))
 	}
@@ -158,6 +168,21 @@ func (v VolumeServerOptions) startVolumeServer(volumeFolders, maxVolumeCounts, v
 	}
 	if len(v.folders) != len(v.minFreeSpacePercents) {
 		glog.Fatalf("%d directories by -dir, but only %d minFreeSpacePercent is set by -minFreeSpacePercent", len(v.folders), len(v.minFreeSpacePercents))
+	}
+
+	// set disk types
+	var diskTypes []types.DiskType
+	diskTypeStrings := strings.Split(*v.diskType, ",")
+	for _, diskTypeString := range diskTypeStrings {
+		diskTypes = append(diskTypes, types.ToDiskType(diskTypeString))
+	}
+	if len(diskTypes) == 1 && len(v.folders) > 1 {
+		for i := 0; i < len(v.folders)-1; i++ {
+			diskTypes = append(diskTypes, diskTypes[0])
+		}
+	}
+	if len(v.folders) != len(diskTypes) {
+		glog.Fatalf("%d directories by -dir, but only %d disk types is set by -disk", len(v.folders), len(diskTypes))
 	}
 
 	// security related white list configuration
@@ -205,7 +230,8 @@ func (v VolumeServerOptions) startVolumeServer(volumeFolders, maxVolumeCounts, v
 
 	volumeServer := weed_server.NewVolumeServer(volumeMux, publicVolumeMux,
 		*v.ip, *v.port, *v.publicUrl,
-		v.folders, v.folderMaxLimits, v.minFreeSpacePercents,
+		v.folders, v.folderMaxLimits, v.minFreeSpacePercents, diskTypes,
+		*v.idxFolder,
 		volumeNeedleMapKind,
 		strings.Split(masters, ","), 5, *v.dataCenter, *v.rack,
 		v.whiteList,

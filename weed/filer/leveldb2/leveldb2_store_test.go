@@ -11,7 +11,7 @@ import (
 )
 
 func TestCreateAndFind(t *testing.T) {
-	testFiler := filer.NewFiler(nil, nil, "", 0, "", "", nil)
+	testFiler := filer.NewFiler(nil, nil, "", 0, "", "", "", nil)
 	dir, _ := ioutil.TempDir("", "seaweedfs_filer_test")
 	defer os.RemoveAll(dir)
 	store := &LevelDB2Store{}
@@ -49,14 +49,14 @@ func TestCreateAndFind(t *testing.T) {
 	}
 
 	// checking one upper directory
-	entries, _ := testFiler.ListDirectoryEntries(ctx, util.FullPath("/home/chris/this/is/one"), "", false, 100, "")
+	entries, _, _ := testFiler.ListDirectoryEntries(ctx, util.FullPath("/home/chris/this/is/one"), "", false, 100, "", "")
 	if len(entries) != 1 {
 		t.Errorf("list entries count: %v", len(entries))
 		return
 	}
 
 	// checking one upper directory
-	entries, _ = testFiler.ListDirectoryEntries(ctx, util.FullPath("/"), "", false, 100, "")
+	entries, _, _ = testFiler.ListDirectoryEntries(ctx, util.FullPath("/"), "", false, 100, "", "")
 	if len(entries) != 1 {
 		t.Errorf("list entries count: %v", len(entries))
 		return
@@ -65,7 +65,7 @@ func TestCreateAndFind(t *testing.T) {
 }
 
 func TestEmptyRoot(t *testing.T) {
-	testFiler := filer.NewFiler(nil, nil, "", 0, "", "", nil)
+	testFiler := filer.NewFiler(nil, nil, "", 0, "", "", "", nil)
 	dir, _ := ioutil.TempDir("", "seaweedfs_filer_test2")
 	defer os.RemoveAll(dir)
 	store := &LevelDB2Store{}
@@ -75,7 +75,7 @@ func TestEmptyRoot(t *testing.T) {
 	ctx := context.Background()
 
 	// checking one upper directory
-	entries, err := testFiler.ListDirectoryEntries(ctx, util.FullPath("/"), "", false, 100, "")
+	entries, _, err := testFiler.ListDirectoryEntries(ctx, util.FullPath("/"), "", false, 100, "", "")
 	if err != nil {
 		t.Errorf("list entries: %v", err)
 		return

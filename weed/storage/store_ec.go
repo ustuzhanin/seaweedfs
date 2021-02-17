@@ -58,6 +58,7 @@ func (s *Store) MountEcShards(collection string, vid needle.VolumeId, shardId er
 				Id:          uint32(vid),
 				Collection:  collection,
 				EcIndexBits: uint32(shardBits.AddShardId(shardId)),
+				DiskType:    string(location.DiskType),
 			}
 			return nil
 		} else if err == os.ErrNotExist {
@@ -82,6 +83,7 @@ func (s *Store) UnmountEcShards(vid needle.VolumeId, shardId erasure_coding.Shar
 		Id:          uint32(vid),
 		Collection:  ecShard.Collection,
 		EcIndexBits: uint32(shardBits.AddShardId(shardId)),
+		DiskType:    string(ecShard.DiskType),
 	}
 
 	for _, location := range s.Locations {
@@ -128,10 +130,10 @@ func (s *Store) ReadEcShardNeedle(vid needle.VolumeId, n *needle.Needle) (int, e
 				return 0, fmt.Errorf("locate in local ec volume: %v", err)
 			}
 			if size.IsDeleted() {
-				return 0, fmt.Errorf("entry %s is deleted", n.Id)
+				return 0, ErrorDeleted
 			}
 
-			glog.V(3).Infof("read ec volume %d offset %d size %d intervals:%+v", vid, offset.ToAcutalOffset(), size, intervals)
+			glog.V(3).Infof("read ec volume %d offset %d size %d intervals:%+v", vid, offset.ToActualOffset(), size, intervals)
 
 			if len(intervals) > 1 {
 				glog.V(3).Infof("ReadEcShardNeedle needle id %s intervals:%+v", n.String(), intervals)
@@ -141,10 +143,10 @@ func (s *Store) ReadEcShardNeedle(vid needle.VolumeId, n *needle.Needle) (int, e
 				return 0, fmt.Errorf("ReadEcShardIntervals: %v", err)
 			}
 			if isDeleted {
-				return 0, fmt.Errorf("ec entry %s is deleted", n.Id)
+				return 0, ErrorDeleted
 			}
 
-			err = n.ReadBytes(bytes, offset.ToAcutalOffset(), size, localEcVolume.Version)
+			err = n.ReadBytes(bytes, offset.ToActualOffset(), size, localEcVolume.Version)
 			if err != nil {
 				return 0, fmt.Errorf("readbytes: %v", err)
 			}

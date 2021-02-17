@@ -15,12 +15,17 @@ func (fs *FilerServer) AtomicRenameEntry(ctx context.Context, req *filer_pb.Atom
 
 	glog.V(1).Infof("AtomicRenameEntry %v", req)
 
+	oldParent := util.FullPath(filepath.ToSlash(req.OldDirectory))
+	newParent := util.FullPath(filepath.ToSlash(req.NewDirectory))
+
+	if err := fs.filer.CanRename(oldParent, newParent); err != nil {
+		return nil, err
+	}
+
 	ctx, err := fs.filer.BeginTransaction(ctx)
 	if err != nil {
 		return nil, err
 	}
-
-	oldParent := util.FullPath(filepath.ToSlash(req.OldDirectory))
 
 	oldEntry, err := fs.filer.FindEntry(ctx, oldParent.Child(req.OldName))
 	if err != nil {
@@ -29,7 +34,7 @@ func (fs *FilerServer) AtomicRenameEntry(ctx context.Context, req *filer_pb.Atom
 	}
 
 	var events MoveEvents
-	moveErr := fs.moveEntry(ctx, oldParent, oldEntry, util.FullPath(filepath.ToSlash(req.NewDirectory)), req.NewName, &events)
+	moveErr := fs.moveEntry(ctx, oldParent, oldEntry, newParent, req.NewName, &events)
 	if moveErr != nil {
 		fs.filer.RollbackTransaction(ctx)
 		return nil, fmt.Errorf("%s/%s move error: %v", req.OldDirectory, req.OldName, moveErr)
@@ -70,7 +75,7 @@ func (fs *FilerServer) moveFolderSubEntries(ctx context.Context, oldParent util.
 	includeLastFile := false
 	for {
 
-		entries, err := fs.filer.ListDirectoryEntries(ctx, currentDirPath, lastFileName, includeLastFile, 1024, "")
+		entries, hasMore, err := fs.filer.ListDirectoryEntries(ctx, currentDirPath, lastFileName, includeLastFile, 1024, "", "")
 		if err != nil {
 			return err
 		}
@@ -85,7 +90,7 @@ func (fs *FilerServer) moveFolderSubEntries(ctx context.Context, oldParent util.
 				return err
 			}
 		}
-		if len(entries) < 1024 {
+		if !hasMore {
 			break
 		}
 	}
@@ -110,6 +115,7 @@ func (fs *FilerServer) moveSelfEntry(ctx context.Context, oldParent util.FullPat
 		Attr:     entry.Attr,
 		Chunks:   entry.Chunks,
 		Extended: entry.Extended,
+		Content:  entry.Content,
 	}
 	createErr := fs.filer.CreateEntry(ctx, newEntry, false, false, nil)
 	if createErr != nil {

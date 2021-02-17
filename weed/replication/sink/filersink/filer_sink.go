@@ -3,6 +3,8 @@ package filersink
 import (
 	"context"
 	"fmt"
+	"github.com/chrislusf/seaweedfs/weed/pb"
+	"github.com/chrislusf/seaweedfs/weed/wdclient"
 
 	"google.golang.org/grpc"
 
@@ -17,14 +19,17 @@ import (
 )
 
 type FilerSink struct {
-	filerSource    *source.FilerSource
-	grpcAddress    string
-	dir            string
-	replication    string
-	collection     string
-	ttlSec         int32
-	dataCenter     string
-	grpcDialOption grpc.DialOption
+	filerSource       *source.FilerSource
+	grpcAddress       string
+	dir               string
+	replication       string
+	collection        string
+	ttlSec            int32
+	diskType          string
+	dataCenter        string
+	grpcDialOption    grpc.DialOption
+	address           string
+	writeChunkByFiler bool
 }
 
 func init() {
@@ -41,26 +46,35 @@ func (fs *FilerSink) GetSinkToDirectory() string {
 
 func (fs *FilerSink) Initialize(configuration util.Configuration, prefix string) error {
 	return fs.DoInitialize(
+		"",
 		configuration.GetString(prefix+"grpcAddress"),
 		configuration.GetString(prefix+"directory"),
 		configuration.GetString(prefix+"replication"),
 		configuration.GetString(prefix+"collection"),
 		configuration.GetInt(prefix+"ttlSec"),
-		security.LoadClientTLS(util.GetViper(), "grpc.client"))
+		configuration.GetString(prefix+"disk"),
+		security.LoadClientTLS(util.GetViper(), "grpc.client"),
+		false)
 }
 
 func (fs *FilerSink) SetSourceFiler(s *source.FilerSource) {
 	fs.filerSource = s
 }
 
-func (fs *FilerSink) DoInitialize(grpcAddress string, dir string,
-	replication string, collection string, ttlSec int, grpcDialOption grpc.DialOption) (err error) {
+func (fs *FilerSink) DoInitialize(address, grpcAddress string, dir string,
+	replication string, collection string, ttlSec int, diskType string, grpcDialOption grpc.DialOption, writeChunkByFiler bool) (err error) {
+	fs.address = address
+	if fs.address == "" {
+		fs.address = pb.GrpcAddressToServerAddress(grpcAddress)
+	}
 	fs.grpcAddress = grpcAddress
 	fs.dir = dir
 	fs.replication = replication
 	fs.collection = collection
 	fs.ttlSec = int32(ttlSec)
+	fs.diskType = diskType
 	fs.grpcDialOption = grpcDialOption
+	fs.writeChunkByFiler = writeChunkByFiler
 	return nil
 }
 
@@ -96,7 +110,7 @@ func (fs *FilerSink) CreateEntry(key string, entry *filer_pb.Entry, signatures [
 			}
 		}
 
-		replicatedChunks, err := fs.replicateChunks(entry.Chunks, dir)
+		replicatedChunks, err := fs.replicateChunks(entry.Chunks, key)
 
 		if err != nil {
 			// only warning here since the source chunk may have been deleted already
@@ -112,6 +126,7 @@ func (fs *FilerSink) CreateEntry(key string, entry *filer_pb.Entry, signatures [
 				IsDirectory: entry.IsDirectory,
 				Attributes:  entry.Attributes,
 				Chunks:      replicatedChunks,
+				Content:     entry.Content,
 			},
 			IsFromOtherCluster: true,
 			Signatures:         signatures,
@@ -180,7 +195,7 @@ func (fs *FilerSink) UpdateEntry(key string, oldEntry *filer_pb.Entry, newParent
 		}
 
 		// replicate the chunks that are new in the source
-		replicatedChunks, err := fs.replicateChunks(newChunks, newParentPath)
+		replicatedChunks, err := fs.replicateChunks(newChunks, key)
 		if err != nil {
 			return true, fmt.Errorf("replicte %s chunks error: %v", key, err)
 		}
@@ -205,7 +220,7 @@ func (fs *FilerSink) UpdateEntry(key string, oldEntry *filer_pb.Entry, newParent
 	})
 
 }
-func compareChunks(lookupFileIdFn filer.LookupFileIdFunctionType, oldEntry, newEntry *filer_pb.Entry) (deletedChunks, newChunks []*filer_pb.FileChunk, err error) {
+func compareChunks(lookupFileIdFn wdclient.LookupFileIdFunctionType, oldEntry, newEntry *filer_pb.Entry) (deletedChunks, newChunks []*filer_pb.FileChunk, err error) {
 	aData, aMeta, aErr := filer.ResolveChunkManifest(lookupFileIdFn, oldEntry.Chunks)
 	if aErr != nil {
 		return nil, nil, aErr

@@ -25,6 +25,8 @@ public class SeaweedFileSystem extends FileSystem {
     public static final String FS_SEAWEED_FILER_PORT = "fs.seaweed.filer.port";
     public static final int FS_SEAWEED_DEFAULT_PORT = 8888;
     public static final String FS_SEAWEED_BUFFER_SIZE = "fs.seaweed.buffer.size";
+    public static final String FS_SEAWEED_REPLICATION = "fs.seaweed.replication";
+    public static final String FS_SEAWEED_VOLUME_SERVER_ACCESS = "fs.seaweed.volume.server.access";
     public static final int FS_SEAWEED_DEFAULT_BUFFER_SIZE = 4 * 1024 * 1024;
 
     private static final Logger LOG = LoggerFactory.getLogger(SeaweedFileSystem.class);
@@ -61,8 +63,14 @@ public class SeaweedFileSystem extends FileSystem {
         setConf(conf);
         this.uri = uri;
 
-        seaweedFileSystemStore = new SeaweedFileSystemStore(host, port);
+        seaweedFileSystemStore = new SeaweedFileSystemStore(host, port, conf);
 
+    }
+
+    @Override
+    public void close() throws IOException {
+        super.close();
+        this.seaweedFileSystemStore.close();
     }
 
     @Override
@@ -74,8 +82,8 @@ public class SeaweedFileSystem extends FileSystem {
 
         try {
             int seaweedBufferSize = this.getConf().getInt(FS_SEAWEED_BUFFER_SIZE, FS_SEAWEED_DEFAULT_BUFFER_SIZE);
-            FSInputStream inputStream = seaweedFileSystemStore.openFileForRead(path, statistics, seaweedBufferSize);
-            return new FSDataInputStream(new BufferedFSInputStream(inputStream, 4 * seaweedBufferSize));
+            FSInputStream inputStream = seaweedFileSystemStore.openFileForRead(path, statistics);
+            return new FSDataInputStream(new BufferedByteBufferReadableInputStream(inputStream, 4 * seaweedBufferSize));
         } catch (Exception ex) {
             LOG.warn("open path: {} bufferSize:{}", path, bufferSize, ex);
             return null;
@@ -91,7 +99,7 @@ public class SeaweedFileSystem extends FileSystem {
         path = qualify(path);
 
         try {
-            String replicaPlacement = String.format("%03d", replication - 1);
+            String replicaPlacement = this.getConf().get(FS_SEAWEED_REPLICATION, String.format("%03d", replication - 1));
             int seaweedBufferSize = this.getConf().getInt(FS_SEAWEED_BUFFER_SIZE, FS_SEAWEED_DEFAULT_BUFFER_SIZE);
             OutputStream outputStream = seaweedFileSystemStore.createFile(path, overwrite, permission, seaweedBufferSize, replicaPlacement);
             return new FSDataOutputStream(outputStream, statistics);

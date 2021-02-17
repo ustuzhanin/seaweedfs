@@ -6,6 +6,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"github.com/chrislusf/seaweedfs/weed/glog"
 	"github.com/chrislusf/seaweedfs/weed/images"
 	"github.com/chrislusf/seaweedfs/weed/pb/filer_pb"
+	xhttp "github.com/chrislusf/seaweedfs/weed/s3api/http"
 	"github.com/chrislusf/seaweedfs/weed/stats"
 	"github.com/chrislusf/seaweedfs/weed/util"
 )
@@ -59,7 +61,7 @@ func (fs *FilerServer) GetOrHeadHandler(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	if len(entry.Chunks) == 0 {
+	if len(entry.Chunks) == 0 && len(entry.Content) == 0 {
 		glog.V(1).Infof("no file chunks for %s, attr=%+v", path, entry.Attr)
 		stats.FilerRequestCounter.WithLabelValues("read.nocontent").Inc()
 		w.WriteHeader(http.StatusNoContent)
@@ -93,6 +95,34 @@ func (fs *FilerServer) GetOrHeadHandler(w http.ResponseWriter, r *http.Request, 
 		}
 	}
 
+	// print out the header from extended properties
+	for k, v := range entry.Extended {
+		w.Header().Set(k, string(v))
+	}
+
+	//Seaweed custom header are not visible to Vue or javascript
+	seaweedHeaders := []string{}
+	for header, _ := range w.Header() {
+		if strings.HasPrefix(header, "Seaweed-") {
+			seaweedHeaders = append(seaweedHeaders, header)
+		}
+	}
+	seaweedHeaders = append(seaweedHeaders, "Content-Disposition")
+	w.Header().Set("Access-Control-Expose-Headers", strings.Join(seaweedHeaders, ","))
+
+	//set tag count
+	if r.Method == "GET" {
+		tagCount := 0
+		for k := range entry.Extended {
+			if strings.HasPrefix(k, xhttp.AmzObjectTagging+"-") {
+				tagCount++
+			}
+		}
+		if tagCount > 0 {
+			w.Header().Set(xhttp.AmzTagCount, strconv.Itoa(tagCount))
+		}
+	}
+
 	// set etag
 	etag := filer.ETagEntry(entry)
 	if inm := r.Header.Get("If-None-Match"); inm == "\""+etag+"\"" {
@@ -102,14 +132,15 @@ func (fs *FilerServer) GetOrHeadHandler(w http.ResponseWriter, r *http.Request, 
 	setEtag(w, etag)
 
 	filename := entry.Name()
+	filename = url.QueryEscape(filename)
 	adjustHeaderContentDisposition(w, r, filename)
 
+	totalSize := int64(entry.Size())
+
 	if r.Method == "HEAD" {
-		w.Header().Set("Content-Length", strconv.FormatInt(int64(entry.Size()), 10))
+		w.Header().Set("Content-Length", strconv.FormatInt(totalSize, 10))
 		return
 	}
-
-	totalSize := int64(entry.Size())
 
 	if rangeReq := r.Header.Get("Range"); rangeReq == "" {
 		ext := filepath.Ext(filename)
@@ -127,7 +158,14 @@ func (fs *FilerServer) GetOrHeadHandler(w http.ResponseWriter, r *http.Request, 
 		}
 	}
 
-	processRangeRequest(r, w, totalSize, mimeType, func(writer io.Writer, offset int64, size int64) error {
+	processRangeRequest(r, w, totalSize, mimeType, func(writer io.Writer, offset int64, size int64, httpStatusCode int) error {
+		if httpStatusCode != 0 {
+			w.WriteHeader(httpStatusCode)
+		}
+		if offset+size <= int64(len(entry.Content)) {
+			_, err := writer.Write(entry.Content[offset : offset+size])
+			return err
+		}
 		return filer.StreamContent(fs.filer.MasterClient, writer, entry.Chunks, offset, size)
 	})
 

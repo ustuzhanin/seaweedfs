@@ -3,9 +3,8 @@ package weed_server
 import (
 	"context"
 	"fmt"
-	"github.com/chrislusf/seaweedfs/weed/storage/backend"
-
 	"github.com/chrislusf/raft"
+	"github.com/chrislusf/seaweedfs/weed/storage/types"
 
 	"github.com/chrislusf/seaweedfs/weed/pb/master_pb"
 	"github.com/chrislusf/seaweedfs/weed/security"
@@ -62,11 +61,13 @@ func (ms *MasterServer) Assign(ctx context.Context, req *master_pb.AssignRequest
 	if err != nil {
 		return nil, err
 	}
+	diskType := types.ToDiskType(req.DiskType)
 
 	option := &topology.VolumeGrowOption{
 		Collection:         req.Collection,
 		ReplicaPlacement:   replicaPlacement,
 		Ttl:                ttl,
+		DiskType:           diskType,
 		Prealloacte:        ms.preallocateSize,
 		DataCenter:         req.DataCenter,
 		Rack:               req.Rack,
@@ -75,7 +76,7 @@ func (ms *MasterServer) Assign(ctx context.Context, req *master_pb.AssignRequest
 	}
 
 	if !ms.Topo.HasWritableVolume(option) {
-		if ms.Topo.FreeSpace() <= 0 {
+		if ms.Topo.AvailableSpaceFor(option) <= 0 {
 			return nil, fmt.Errorf("No free volumes left!")
 		}
 		ms.vgLock.Lock()
@@ -119,10 +120,10 @@ func (ms *MasterServer) Statistics(ctx context.Context, req *master_pb.Statistic
 		return nil, err
 	}
 
-	volumeLayout := ms.Topo.GetVolumeLayout(req.Collection, replicaPlacement, ttl)
+	volumeLayout := ms.Topo.GetVolumeLayout(req.Collection, replicaPlacement, ttl, types.ToDiskType(req.DiskType))
 	stats := volumeLayout.Stats()
 
-	totalSize := ms.Topo.GetMaxVolumeCount() * int64(ms.option.VolumeSizeLimitMB) * 1024 * 1024
+	totalSize := ms.Topo.GetDiskUsages().GetMaxVolumeCount() * int64(ms.option.VolumeSizeLimitMB) * 1024 * 1024
 
 	resp := &master_pb.StatisticsResponse{
 		TotalSize: uint64(totalSize),
@@ -180,14 +181,15 @@ func (ms *MasterServer) LookupEcVolume(ctx context.Context, req *master_pb.Looku
 	return resp, nil
 }
 
-func (ms *MasterServer) GetMasterConfiguration(ctx context.Context, req *master_pb.GetMasterConfigurationRequest) (*master_pb.GetMasterConfigurationResponse, error) {
+func (ms *MasterServer) VacuumVolume(ctx context.Context, req *master_pb.VacuumVolumeRequest) (*master_pb.VacuumVolumeResponse, error) {
 
-	resp := &master_pb.GetMasterConfigurationResponse{
-		MetricsAddress:         ms.option.MetricsAddress,
-		MetricsIntervalSeconds: uint32(ms.option.MetricsIntervalSec),
-		StorageBackends:        backend.ToPbStorageBackends(),
-		DefaultReplication:     ms.option.DefaultReplicaPlacement,
+	if !ms.Topo.IsLeader() {
+		return nil, raft.NotLeaderError
 	}
+
+	resp := &master_pb.VacuumVolumeResponse{}
+
+	ms.Topo.Vacuum(ms.grpcDialOption, float64(req.GarbageThreshold), ms.preallocateSize)
 
 	return resp, nil
 }

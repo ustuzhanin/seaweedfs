@@ -42,13 +42,17 @@ func batchVacuumVolumeCheck(grpcDialOption grpc.DialOption, vl *VolumeLayout, vi
 		}(index, dn.Url(), vid)
 	}
 	vacuumLocationList := NewVolumeLocationList()
+
+	waitTimeout := time.NewTimer(30 * time.Minute)
+	defer waitTimeout.Stop()
+
 	for range locationlist.list {
 		select {
 		case index := <-ch:
 			if index != -1 {
 				vacuumLocationList.list = append(vacuumLocationList.list, locationlist.list[index])
 			}
-		case <-time.After(30 * time.Minute):
+		case <-waitTimeout.C:
 			return vacuumLocationList, false
 		}
 	}
@@ -81,11 +85,15 @@ func batchVacuumVolumeCompact(grpcDialOption grpc.DialOption, vl *VolumeLayout, 
 		}(index, dn.Url(), vid)
 	}
 	isVacuumSuccess := true
+
+	waitTimeout := time.NewTimer(30 * time.Minute)
+	defer waitTimeout.Stop()
+
 	for range locationlist.list {
 		select {
 		case canCommit := <-ch:
 			isVacuumSuccess = isVacuumSuccess && canCommit
-		case <-time.After(30 * time.Minute):
+		case <-waitTimeout.C:
 			return false
 		}
 	}
@@ -100,7 +108,7 @@ func batchVacuumVolumeCommit(grpcDialOption grpc.DialOption, vl *VolumeLayout, v
 			resp, err := volumeServerClient.VacuumVolumeCommit(context.Background(), &volume_server_pb.VacuumVolumeCommitRequest{
 				VolumeId: uint32(vid),
 			})
-			if resp.IsReadOnly {
+			if resp != nil && resp.IsReadOnly {
 				isReadOnly = true
 			}
 			return err
@@ -136,12 +144,12 @@ func batchVacuumVolumeCleanup(grpcDialOption grpc.DialOption, vl *VolumeLayout, 
 	}
 }
 
-func (t *Topology) Vacuum(grpcDialOption grpc.DialOption, garbageThreshold float64, preallocate int64) int {
+func (t *Topology) Vacuum(grpcDialOption grpc.DialOption, garbageThreshold float64, preallocate int64) {
 
 	// if there is vacuum going on, return immediately
 	swapped := atomic.CompareAndSwapInt64(&t.vacuumLockCounter, 0, 1)
 	if !swapped {
-		return 0
+		return
 	}
 	defer atomic.StoreInt64(&t.vacuumLockCounter, 0)
 
@@ -157,7 +165,6 @@ func (t *Topology) Vacuum(grpcDialOption grpc.DialOption, garbageThreshold float
 			}
 		}
 	}
-	return 0
 }
 
 func vacuumOneVolumeLayout(grpcDialOption grpc.DialOption, volumeLayout *VolumeLayout, c *Collection, garbageThreshold float64, preallocate int64) {

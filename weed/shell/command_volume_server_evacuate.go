@@ -8,7 +8,9 @@ import (
 	"github.com/chrislusf/seaweedfs/weed/storage/erasure_coding"
 	"github.com/chrislusf/seaweedfs/weed/storage/needle"
 	"github.com/chrislusf/seaweedfs/weed/storage/super_block"
+	"github.com/chrislusf/seaweedfs/weed/storage/types"
 	"io"
+	"os"
 	"sort"
 )
 
@@ -99,17 +101,19 @@ func evacuateNormalVolumes(commandEnv *CommandEnv, resp *master_pb.VolumeListRes
 
 	// move away normal volumes
 	volumeReplicas, _ := collectVolumeReplicaLocations(resp)
-	for _, vol := range thisNode.info.VolumeInfos {
-		hasMoved, err := moveAwayOneNormalVolume(commandEnv, volumeReplicas, vol, thisNode, otherNodes, applyChange)
-		if err != nil {
-			return fmt.Errorf("move away volume %d from %s: %v", vol.Id, volumeServer, err)
-		}
-		if !hasMoved {
-			if skipNonMoveable {
-				replicaPlacement, _ := super_block.NewReplicaPlacementFromByte(byte(vol.ReplicaPlacement))
-				fmt.Fprintf(writer, "skipping non moveable volume %d replication:%s\n", vol.Id, replicaPlacement.String())
-			} else {
-				return fmt.Errorf("failed to move volume %d from %s", vol.Id, volumeServer)
+	for _, diskInfo := range thisNode.info.DiskInfos {
+		for _, vol := range diskInfo.VolumeInfos {
+			hasMoved, err := moveAwayOneNormalVolume(commandEnv, volumeReplicas, vol, thisNode, otherNodes, applyChange)
+			if err != nil {
+				return fmt.Errorf("move away volume %d from %s: %v", vol.Id, volumeServer, err)
+			}
+			if !hasMoved {
+				if skipNonMoveable {
+					replicaPlacement, _ := super_block.NewReplicaPlacementFromByte(byte(vol.ReplicaPlacement))
+					fmt.Fprintf(writer, "skipping non moveable volume %d replication:%s\n", vol.Id, replicaPlacement.String())
+				} else {
+					return fmt.Errorf("failed to move volume %d from %s", vol.Id, volumeServer)
+				}
 			}
 		}
 	}
@@ -125,16 +129,18 @@ func evacuateEcVolumes(commandEnv *CommandEnv, resp *master_pb.VolumeListRespons
 	}
 
 	// move away ec volumes
-	for _, ecShardInfo := range thisNode.info.EcShardInfos {
-		hasMoved, err := moveAwayOneEcVolume(commandEnv, ecShardInfo, thisNode, otherNodes, applyChange)
-		if err != nil {
-			return fmt.Errorf("move away volume %d from %s: %v", ecShardInfo.Id, volumeServer, err)
-		}
-		if !hasMoved {
-			if skipNonMoveable {
-				fmt.Fprintf(writer, "failed to move away ec volume %d from %s\n", ecShardInfo.Id, volumeServer)
-			} else {
-				return fmt.Errorf("failed to move away ec volume %d from %s", ecShardInfo.Id, volumeServer)
+	for _, diskInfo := range thisNode.info.DiskInfos {
+		for _, ecShardInfo := range diskInfo.EcShardInfos {
+			hasMoved, err := moveAwayOneEcVolume(commandEnv, ecShardInfo, thisNode, otherNodes, applyChange)
+			if err != nil {
+				return fmt.Errorf("move away volume %d from %s: %v", ecShardInfo.Id, volumeServer, err)
+			}
+			if !hasMoved {
+				if skipNonMoveable {
+					fmt.Fprintf(writer, "failed to move away ec volume %d from %s\n", ecShardInfo.Id, volumeServer)
+				} else {
+					return fmt.Errorf("failed to move away ec volume %d from %s", ecShardInfo.Id, volumeServer)
+				}
 			}
 		}
 	}
@@ -151,6 +157,11 @@ func moveAwayOneEcVolume(commandEnv *CommandEnv, ecShardInfo *master_pb.VolumeEc
 
 		for i := 0; i < len(otherNodes); i++ {
 			emptyNode := otherNodes[i]
+			collectionPrefix := ""
+			if ecShardInfo.Collection != "" {
+				collectionPrefix = ecShardInfo.Collection + "_"
+			}
+			fmt.Fprintf(os.Stdout, "moving ec volume %s%d.%d %s => %s\n", collectionPrefix, ecShardInfo.Id, shardId, thisNode.info.Id, emptyNode.info.Id)
 			err = moveMountedShardToEcNode(commandEnv, thisNode, ecShardInfo.Collection, needle.VolumeId(ecShardInfo.Id), shardId, emptyNode, applyChange)
 			if err != nil {
 				return
@@ -168,8 +179,9 @@ func moveAwayOneEcVolume(commandEnv *CommandEnv, ecShardInfo *master_pb.VolumeEc
 }
 
 func moveAwayOneNormalVolume(commandEnv *CommandEnv, volumeReplicas map[uint32][]*VolumeReplica, vol *master_pb.VolumeInformationMessage, thisNode *Node, otherNodes []*Node, applyChange bool) (hasMoved bool, err error) {
+	fn := capacityByFreeVolumeCount(types.ToDiskType(vol.DiskType))
 	sort.Slice(otherNodes, func(i, j int) bool {
-		return otherNodes[i].localVolumeRatio() < otherNodes[j].localVolumeRatio()
+		return otherNodes[i].localVolumeRatio(fn) > otherNodes[j].localVolumeRatio(fn)
 	})
 
 	for i := 0; i < len(otherNodes); i++ {

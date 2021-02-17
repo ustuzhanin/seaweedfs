@@ -3,7 +3,9 @@ package weed_server
 import (
 	"context"
 	"fmt"
+	"github.com/chrislusf/seaweedfs/weed/storage/types"
 	"io"
+	"io/ioutil"
 	"math"
 	"os"
 	"time"
@@ -35,11 +37,6 @@ func (vs *VolumeServer) VolumeCopy(ctx context.Context, req *volume_server_pb.Vo
 		glog.V(0).Infof("deleted existing volume %d before copying.", req.VolumeId)
 	}
 
-	location := vs.store.FindFreeLocation()
-	if location == nil {
-		return nil, fmt.Errorf("no space left")
-	}
-
 	// the master will not start compaction for read-only volumes, so it is safe to just copy files directly
 	// copy .dat and .idx files
 	//   read .idx .dat file size and timestamp
@@ -47,7 +44,7 @@ func (vs *VolumeServer) VolumeCopy(ctx context.Context, req *volume_server_pb.Vo
 	//   send .dat file
 	//   confirm size and timestamp
 	var volFileInfoResp *volume_server_pb.ReadVolumeFileStatusResponse
-	var volumeFileName, idxFileName, datFileName string
+	var dataBaseFileName, indexBaseFileName, idxFileName, datFileName string
 	err := operation.WithVolumeServerClient(req.SourceDataNode, vs.grpcDialOption, func(client volume_server_pb.VolumeServerClient) error {
 		var err error
 		volFileInfoResp, err = client.ReadVolumeFileStatus(context.Background(),
@@ -58,21 +55,34 @@ func (vs *VolumeServer) VolumeCopy(ctx context.Context, req *volume_server_pb.Vo
 			return fmt.Errorf("read volume file status failed, %v", err)
 		}
 
-		volumeFileName = storage.VolumeFileName(location.Directory, volFileInfoResp.Collection, int(req.VolumeId))
+		diskType := volFileInfoResp.DiskType
+		if req.DiskType != "" {
+			diskType = req.DiskType
+		}
+		location := vs.store.FindFreeLocation(types.ToDiskType(diskType))
+		if location == nil {
+			return fmt.Errorf("no space left")
+		}
+
+		dataBaseFileName = storage.VolumeFileName(location.Directory, volFileInfoResp.Collection, int(req.VolumeId))
+		indexBaseFileName = storage.VolumeFileName(location.IdxDirectory, volFileInfoResp.Collection, int(req.VolumeId))
+
+		ioutil.WriteFile(dataBaseFileName+".note", []byte(fmt.Sprintf("copying from %s", req.SourceDataNode)), 0755)
 
 		// println("source:", volFileInfoResp.String())
-		// copy ecx file
-		if err := vs.doCopyFile(client, false, req.Collection, req.VolumeId, volFileInfoResp.CompactionRevision, volFileInfoResp.IdxFileSize, volumeFileName, ".idx", false, false); err != nil {
+		if err := vs.doCopyFile(client, false, req.Collection, req.VolumeId, volFileInfoResp.CompactionRevision, volFileInfoResp.DatFileSize, dataBaseFileName, ".dat", false, true); err != nil {
 			return err
 		}
 
-		if err := vs.doCopyFile(client, false, req.Collection, req.VolumeId, volFileInfoResp.CompactionRevision, volFileInfoResp.DatFileSize, volumeFileName, ".dat", false, true); err != nil {
+		if err := vs.doCopyFile(client, false, req.Collection, req.VolumeId, volFileInfoResp.CompactionRevision, volFileInfoResp.IdxFileSize, indexBaseFileName, ".idx", false, false); err != nil {
 			return err
 		}
 
-		if err := vs.doCopyFile(client, false, req.Collection, req.VolumeId, volFileInfoResp.CompactionRevision, volFileInfoResp.DatFileSize, volumeFileName, ".vif", false, true); err != nil {
+		if err := vs.doCopyFile(client, false, req.Collection, req.VolumeId, volFileInfoResp.CompactionRevision, volFileInfoResp.DatFileSize, dataBaseFileName, ".vif", false, true); err != nil {
 			return err
 		}
+
+		os.Remove(dataBaseFileName + ".note")
 
 		return nil
 	})
@@ -80,18 +90,18 @@ func (vs *VolumeServer) VolumeCopy(ctx context.Context, req *volume_server_pb.Vo
 	if err != nil {
 		return nil, err
 	}
-	if volumeFileName == "" {
+	if dataBaseFileName == "" {
 		return nil, fmt.Errorf("not found volume %d file", req.VolumeId)
 	}
 
-	idxFileName = volumeFileName + ".idx"
-	datFileName = volumeFileName + ".dat"
+	idxFileName = indexBaseFileName + ".idx"
+	datFileName = dataBaseFileName + ".dat"
 
 	defer func() {
-		if err != nil && volumeFileName != "" {
+		if err != nil && dataBaseFileName != "" {
 			os.Remove(idxFileName)
 			os.Remove(datFileName)
-			os.Remove(volumeFileName + ".vif")
+			os.Remove(dataBaseFileName + ".vif")
 		}
 	}()
 
@@ -201,6 +211,7 @@ func (vs *VolumeServer) ReadVolumeFileStatus(ctx context.Context, req *volume_se
 	resp.FileCount = v.FileCount()
 	resp.CompactionRevision = uint32(v.CompactionRevision)
 	resp.Collection = v.Collection
+	resp.DiskType = string(v.DiskType())
 	return resp, nil
 }
 
@@ -219,11 +230,15 @@ func (vs *VolumeServer) CopyFile(req *volume_server_pb.CopyFileRequest, stream v
 		if uint32(v.CompactionRevision) != req.CompactionRevision && req.CompactionRevision != math.MaxUint32 {
 			return fmt.Errorf("volume %d is compacted", req.VolumeId)
 		}
-		fileName = v.FileName() + req.Ext
+		fileName = v.FileName(req.Ext)
 	} else {
 		baseFileName := erasure_coding.EcShardBaseFileName(req.Collection, int(req.VolumeId)) + req.Ext
 		for _, location := range vs.store.Locations {
 			tName := util.Join(location.Directory, baseFileName)
+			if util.FileExists(tName) {
+				fileName = tName
+			}
+			tName = util.Join(location.IdxDirectory, baseFileName)
 			if util.FileExists(tName) {
 				fileName = tName
 			}

@@ -15,7 +15,7 @@ import (
 	"github.com/chrislusf/seaweedfs/weed/security"
 )
 
-func (fs *FilerSink) replicateChunks(sourceChunks []*filer_pb.FileChunk, dir string) (replicatedChunks []*filer_pb.FileChunk, err error) {
+func (fs *FilerSink) replicateChunks(sourceChunks []*filer_pb.FileChunk, path string) (replicatedChunks []*filer_pb.FileChunk, err error) {
 	if len(sourceChunks) == 0 {
 		return
 	}
@@ -27,9 +27,10 @@ func (fs *FilerSink) replicateChunks(sourceChunks []*filer_pb.FileChunk, dir str
 		wg.Add(1)
 		go func(chunk *filer_pb.FileChunk, index int) {
 			defer wg.Done()
-			replicatedChunk, e := fs.replicateOneChunk(chunk, dir)
+			replicatedChunk, e := fs.replicateOneChunk(chunk, path)
 			if e != nil {
 				err = e
+				return
 			}
 			replicatedChunks[index] = replicatedChunk
 		}(sourceChunk, chunkIndex)
@@ -39,9 +40,9 @@ func (fs *FilerSink) replicateChunks(sourceChunks []*filer_pb.FileChunk, dir str
 	return
 }
 
-func (fs *FilerSink) replicateOneChunk(sourceChunk *filer_pb.FileChunk, dir string) (*filer_pb.FileChunk, error) {
+func (fs *FilerSink) replicateOneChunk(sourceChunk *filer_pb.FileChunk, path string) (*filer_pb.FileChunk, error) {
 
-	fileId, err := fs.fetchAndWrite(sourceChunk, dir)
+	fileId, err := fs.fetchAndWrite(sourceChunk, path)
 	if err != nil {
 		return nil, fmt.Errorf("copy %s: %v", sourceChunk.GetFileIdString(), err)
 	}
@@ -58,7 +59,7 @@ func (fs *FilerSink) replicateOneChunk(sourceChunk *filer_pb.FileChunk, dir stri
 	}, nil
 }
 
-func (fs *FilerSink) fetchAndWrite(sourceChunk *filer_pb.FileChunk, dir string) (fileId string, err error) {
+func (fs *FilerSink) fetchAndWrite(sourceChunk *filer_pb.FileChunk, path string) (fileId string, err error) {
 
 	filename, header, resp, err := fs.filerSource.ReadPart(sourceChunk.GetFileIdString())
 	if err != nil {
@@ -77,7 +78,8 @@ func (fs *FilerSink) fetchAndWrite(sourceChunk *filer_pb.FileChunk, dir string) 
 			Collection:  fs.collection,
 			TtlSec:      fs.ttlSec,
 			DataCenter:  fs.dataCenter,
-			ParentPath:  dir,
+			DiskType:    fs.diskType,
+			Path:        path,
 		}
 
 		resp, err := client.AssignVolume(context.Background(), request)
@@ -97,6 +99,9 @@ func (fs *FilerSink) fetchAndWrite(sourceChunk *filer_pb.FileChunk, dir string) 
 	}
 
 	fileUrl := fmt.Sprintf("http://%s/%s", host, fileId)
+	if fs.writeChunkByFiler {
+		fileUrl = fmt.Sprintf("http://%s/?proxyChunkId=%s", fs.address, fileId)
+	}
 
 	glog.V(4).Infof("replicating %s to %s header:%+v", filename, fileUrl, header)
 
@@ -124,6 +129,6 @@ func (fs *FilerSink) WithFilerClient(fn func(filer_pb.SeaweedFilerClient) error)
 	}, fs.grpcAddress, fs.grpcDialOption)
 
 }
-func (fs *FilerSink) AdjustedUrl(hostAndPort string) string {
-	return hostAndPort
+func (fs *FilerSink) AdjustedUrl(location *filer_pb.Location) string {
+	return location.Url
 }

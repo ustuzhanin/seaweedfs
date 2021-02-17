@@ -10,9 +10,10 @@ import (
 	"github.com/chrislusf/seaweedfs/weed/operation"
 	"github.com/chrislusf/seaweedfs/weed/pb/filer_pb"
 	"github.com/chrislusf/seaweedfs/weed/security"
+	"github.com/chrislusf/seaweedfs/weed/util"
 )
 
-func (wfs *WFS) saveDataAsChunk(dir string) filer.SaveDataAsChunkFunctionType {
+func (wfs *WFS) saveDataAsChunk(fullPath util.FullPath) filer.SaveDataAsChunkFunctionType {
 
 	return func(reader io.Reader, filename string, offset int64) (chunk *filer_pb.FileChunk, collection, replication string, err error) {
 		var fileId, host string
@@ -25,8 +26,9 @@ func (wfs *WFS) saveDataAsChunk(dir string) filer.SaveDataAsChunkFunctionType {
 				Replication: wfs.option.Replication,
 				Collection:  wfs.option.Collection,
 				TtlSec:      wfs.option.TtlSec,
+				DiskType:    string(wfs.option.DiskType),
 				DataCenter:  wfs.option.DataCenter,
-				ParentPath:  dir,
+				Path:        string(fullPath),
 			}
 
 			resp, err := client.AssignVolume(context.Background(), request)
@@ -38,8 +40,12 @@ func (wfs *WFS) saveDataAsChunk(dir string) filer.SaveDataAsChunkFunctionType {
 				return fmt.Errorf("assign volume failure %v: %v", request, resp.Error)
 			}
 
-			fileId, host, auth = resp.FileId, resp.Url, security.EncodedJwt(resp.Auth)
-			host = wfs.AdjustedUrl(host)
+			fileId, auth = resp.FileId, security.EncodedJwt(resp.Auth)
+			loc := &filer_pb.Location{
+				Url:       resp.Url,
+				PublicUrl: resp.PublicUrl,
+			}
+			host = wfs.AdjustedUrl(loc)
 			collection, replication = resp.Collection, resp.Replication
 
 			return nil
@@ -48,6 +54,9 @@ func (wfs *WFS) saveDataAsChunk(dir string) filer.SaveDataAsChunkFunctionType {
 		}
 
 		fileUrl := fmt.Sprintf("http://%s/%s", host, fileId)
+		if wfs.option.VolumeServerAccess == "filerProxy" {
+			fileUrl = fmt.Sprintf("http://%s/?proxyChunkId=%s", wfs.option.FilerAddress, fileId)
+		}
 		uploadResult, err, data := operation.Upload(fileUrl, filename, wfs.option.Cipher, reader, false, "", nil, auth)
 		if err != nil {
 			glog.V(0).Infof("upload data %v to %s: %v", filename, fileUrl, err)
@@ -61,6 +70,6 @@ func (wfs *WFS) saveDataAsChunk(dir string) filer.SaveDataAsChunkFunctionType {
 		wfs.chunkCache.SetChunk(fileId, data)
 
 		chunk = uploadResult.ToPbFileChunk(fileId, offset)
-		return chunk, "", "", nil
+		return chunk, collection, replication, nil
 	}
 }

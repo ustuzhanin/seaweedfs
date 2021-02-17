@@ -2,7 +2,9 @@ package meta_cache
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"strings"
 	"sync"
 
 	"github.com/chrislusf/seaweedfs/weed/filer"
@@ -20,13 +22,20 @@ type MetaCache struct {
 	sync.RWMutex
 	visitedBoundary *bounded_tree.BoundedTree
 	uidGidMapper    *UidGidMapper
+	invalidateFunc  func(util.FullPath)
 }
 
-func NewMetaCache(dbFolder string, uidGidMapper *UidGidMapper) *MetaCache {
+func NewMetaCache(dbFolder string, baseDir util.FullPath, uidGidMapper *UidGidMapper, invalidateFunc func(util.FullPath)) *MetaCache {
 	return &MetaCache{
 		localStore:      openMetaStore(dbFolder),
-		visitedBoundary: bounded_tree.NewBoundedTree(),
+		visitedBoundary: bounded_tree.NewBoundedTree(baseDir),
 		uidGidMapper:    uidGidMapper,
+		invalidateFunc: func(fullpath util.FullPath) {
+			if baseDir != "/" && strings.HasPrefix(string(fullpath), string(baseDir)) {
+				fullpath = fullpath[len(baseDir):]
+			}
+			invalidateFunc(fullpath)
+		},
 	}
 }
 
@@ -69,6 +78,7 @@ func (mc *MetaCache) AtomicUpdateEntryFromFiler(ctx context.Context, oldPath uti
 				// skip the unnecessary deletion
 				// leave the update to the following InsertEntry operation
 			} else {
+				glog.V(3).Infof("DeleteEntry %s/%s", oldPath, oldPath.Name())
 				if err := mc.localStore.DeleteEntry(ctx, oldPath); err != nil {
 					return err
 				}
@@ -81,6 +91,7 @@ func (mc *MetaCache) AtomicUpdateEntryFromFiler(ctx context.Context, oldPath uti
 	if newEntry != nil {
 		newDir, _ := newEntry.DirAndName()
 		if mc.visitedBoundary.HasVisited(util.FullPath(newDir)) {
+			glog.V(3).Infof("InsertEntry %s/%s", newDir, newEntry.Name())
 			if err := mc.localStore.InsertEntry(ctx, newEntry); err != nil {
 				return err
 			}
@@ -112,18 +123,22 @@ func (mc *MetaCache) DeleteEntry(ctx context.Context, fp util.FullPath) (err err
 	return mc.localStore.DeleteEntry(ctx, fp)
 }
 
-func (mc *MetaCache) ListDirectoryEntries(ctx context.Context, dirPath util.FullPath, startFileName string, includeStartFile bool, limit int) ([]*filer.Entry, error) {
+func (mc *MetaCache) ListDirectoryEntries(ctx context.Context, dirPath util.FullPath, startFileName string, includeStartFile bool, limit int64, eachEntryFunc filer.ListEachEntryFunc) error {
 	mc.RLock()
 	defer mc.RUnlock()
 
-	entries, err := mc.localStore.ListDirectoryEntries(ctx, dirPath, startFileName, includeStartFile, limit)
-	if err != nil {
-		return nil, err
+	if !mc.visitedBoundary.HasVisited(dirPath) {
+		return fmt.Errorf("unsynchronized dir: %v", dirPath)
 	}
-	for _, entry := range entries {
+
+	_, err := mc.localStore.ListDirectoryEntries(ctx, dirPath, startFileName, includeStartFile, limit, func(entry *filer.Entry) bool {
 		mc.mapIdFromFilerToLocal(entry)
+		return eachEntryFunc(entry)
+	})
+	if err != nil {
+		return err
 	}
-	return entries, err
+	return err
 }
 
 func (mc *MetaCache) Shutdown() {

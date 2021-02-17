@@ -2,32 +2,36 @@ package command
 
 import (
 	"os"
+	"time"
 )
 
 type MountOptions struct {
-	filer                       *string
-	filerMountRootPath          *string
-	dir                         *string
-	dirAutoCreate               *bool
-	collection                  *string
-	replication                 *string
-	ttlSec                      *int
-	chunkSizeLimitMB            *int
-	cacheDir                    *string
-	cacheSizeMB                 *int64
-	dataCenter                  *string
-	allowOthers                 *bool
-	umaskString                 *string
-	nonempty                    *bool
-	outsideContainerClusterMode *bool
-	uidMap                      *string
-	gidMap                      *string
+	filer              *string
+	filerMountRootPath *string
+	dir                *string
+	dirAutoCreate      *bool
+	collection         *string
+	replication        *string
+	diskType           *string
+	ttlSec             *int
+	chunkSizeLimitMB   *int
+	concurrentWriters  *int
+	cacheDir           *string
+	cacheSizeMB        *int64
+	dataCenter         *string
+	allowOthers        *bool
+	umaskString        *string
+	nonempty           *bool
+	volumeServerAccess *string
+	uidMap             *string
+	gidMap             *string
 }
 
 var (
-	mountOptions    MountOptions
-	mountCpuProfile *string
-	mountMemProfile *string
+	mountOptions       MountOptions
+	mountCpuProfile    *string
+	mountMemProfile    *string
+	mountReadRetryTime *time.Duration
 )
 
 func init() {
@@ -38,19 +42,23 @@ func init() {
 	mountOptions.dirAutoCreate = cmdMount.Flag.Bool("dirAutoCreate", false, "auto create the directory to mount to")
 	mountOptions.collection = cmdMount.Flag.String("collection", "", "collection to create the files")
 	mountOptions.replication = cmdMount.Flag.String("replication", "", "replication(e.g. 000, 001) to create to files. If empty, let filer decide.")
+	mountOptions.diskType = cmdMount.Flag.String("disk", "", "[hdd|ssd] hard drive or solid state drive")
 	mountOptions.ttlSec = cmdMount.Flag.Int("ttl", 0, "file ttl in seconds")
-	mountOptions.chunkSizeLimitMB = cmdMount.Flag.Int("chunkSizeLimitMB", 16, "local write buffer size, also chunk large files")
+	mountOptions.chunkSizeLimitMB = cmdMount.Flag.Int("chunkSizeLimitMB", 2, "local write buffer size, also chunk large files")
+	mountOptions.concurrentWriters = cmdMount.Flag.Int("concurrentWriters", 128, "limit concurrent goroutine writers if not 0")
 	mountOptions.cacheDir = cmdMount.Flag.String("cacheDir", os.TempDir(), "local cache directory for file chunks and meta data")
 	mountOptions.cacheSizeMB = cmdMount.Flag.Int64("cacheCapacityMB", 1000, "local file chunk cache capacity in MB (0 will disable cache)")
 	mountOptions.dataCenter = cmdMount.Flag.String("dataCenter", "", "prefer to write to the data center")
 	mountOptions.allowOthers = cmdMount.Flag.Bool("allowOthers", true, "allows other users to access the file system")
 	mountOptions.umaskString = cmdMount.Flag.String("umask", "022", "octal umask, e.g., 022, 0111")
 	mountOptions.nonempty = cmdMount.Flag.Bool("nonempty", false, "allows the mounting over a non-empty directory")
-	mountCpuProfile = cmdMount.Flag.String("cpuprofile", "", "cpu profile output file")
-	mountMemProfile = cmdMount.Flag.String("memprofile", "", "memory profile output file")
-	mountOptions.outsideContainerClusterMode = cmdMount.Flag.Bool("outsideContainerClusterMode", false, "allows other users to access the file system")
+	mountOptions.volumeServerAccess = cmdMount.Flag.String("volumeServerAccess", "direct", "access volume servers by [direct|publicUrl|filerProxy]")
 	mountOptions.uidMap = cmdMount.Flag.String("map.uid", "", "map local uid to uid on filer, comma-separated <local_uid>:<filer_uid>")
 	mountOptions.gidMap = cmdMount.Flag.String("map.gid", "", "map local gid to gid on filer, comma-separated <local_gid>:<filer_gid>")
+
+	mountCpuProfile = cmdMount.Flag.String("cpuprofile", "", "cpu profile output file")
+	mountMemProfile = cmdMount.Flag.String("memprofile", "", "memory profile output file")
+	mountReadRetryTime = cmdMount.Flag.Duration("readRetryTime", 6*time.Second, "maximum read retry wait time")
 }
 
 var cmdMount = &Command{
@@ -67,12 +75,6 @@ var cmdMount = &Command{
   Linux, and OS X.
 
   On OS X, it requires OSXFUSE (http://osxfuse.github.com/).
-
-  If the SeaweedFS system runs in a container cluster, e.g. managed by kubernetes or docker compose,
-  the volume servers are not accessible by their own ip addresses. 
-  In "outsideContainerClusterMode", the mount will use the filer ip address instead, assuming:
-    * All volume server containers are accessible through the same hostname or IP address as the filer.
-    * All volume server container ports are open external to the cluster.
 
   `,
 }
